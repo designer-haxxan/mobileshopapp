@@ -10,6 +10,7 @@ import * as Posting from '../services/posting.js';
 import * as Printer from '../printer/printer.js';
 import * as Scanner from '../scanner/scanner.js';
 import { partyPicker } from './parties.js';
+import { deviceName, condBadge, ptaBadge, CONDITIONS, PTA } from '../core/mobile.js';
 
 const $ = window.jQuery;
 let st; let $root; let detachWedge = null; let payAccounts = [];
@@ -19,7 +20,7 @@ const draftKey = () => storageKey('draft.' + st.mode);
 const cur = () => getSettings().currency;
 
 function fresh(mode) {
-  return { mode, id: uuid(), editId: null, date: today(), partyId: null, partyName: '', lines: [], discount: 0, note: '', refNo: '', tendered: null, priceMode: pref.get('priceMode', 'retail') };
+  return { mode, id: uuid(), editId: null, date: today(), partyId: null, partyName: '', lines: [], discount: 0, note: '', refNo: '', tendered: null, tradeIn: null, priceMode: pref.get('priceMode', 'retail') };
 }
 function persist() { if (!st.editId) localStorage.setItem(draftKey(), JSON.stringify(st)); }
 function taxRate() {
@@ -47,7 +48,8 @@ function layout() {
       <div class="pos-search">
         <div class="input-group input-group-lg">
           <span class="input-group-text bg-body"><i class="bi bi-search"></i></span>
-          <input type="search" class="form-control pos-q" placeholder="Search or scan product" autocomplete="off" enterkeyhint="search" aria-label="Search product">
+          <input type="search" class="form-control pos-q" placeholder="${sale ? 'Search accessory, phone or scan IMEI' : 'Search or scan product'}" autocomplete="off" enterkeyhint="search" aria-label="Search product">
+          ${sale ? `<button class="btn btn-outline-primary btn-phones" title="Sell a phone by IMEI" aria-label="Phones"><i class="bi bi-phone"></i></button>` : ''}
           <button class="btn btn-outline-secondary btn-scan" title="Scan with camera" aria-label="Scan barcode"><i class="bi bi-upc-scan"></i></button>
           <button class="btn btn-outline-secondary btn-browse d-lg-none" title="Browse products" aria-label="Browse"><i class="bi bi-grid-3x3-gap"></i></button>
         </div>
@@ -62,7 +64,8 @@ function layout() {
             ${sale ? `<li><button class="dropdown-item btn-hold"><i class="bi bi-pause-circle me-2"></i>Hold this sale</button></li>
             <li><button class="dropdown-item btn-price-mode"><i class="bi bi-tags me-2"></i>Use <span class="pm-label"></span> prices</button></li>` : ''}
             <li><button class="dropdown-item btn-scan-cont"><i class="bi bi-upc-scan me-2"></i>Continuous scan</button></li>
-            <li><button class="dropdown-item btn-quick-add"><i class="bi bi-plus-square me-2"></i>Add new product</button></li>
+            <li><button class="dropdown-item btn-quick-add"><i class="bi bi-plus-square me-2"></i>Add new accessory</button></li>
+            ${sale ? '' : `<li><a class="dropdown-item" href="#/phonebuy"><i class="bi bi-phone me-2"></i>Buy phones (IMEI)</a></li>`}
             <li><hr class="dropdown-divider"></li>
             <li><button class="dropdown-item text-danger btn-clear"><i class="bi bi-trash me-2"></i>${st.editId ? 'Cancel editing' : 'Clear cart'}</button></li>
           </ul>
@@ -91,6 +94,13 @@ function renderLines() {
       const p = Catalog.product(l.productId);
       const low = isSale() && !st.editId && p && p.trackStock !== false && !s.allowNegativeStock && l.qty > (p.stock || 0);
       const amt = round2(l.qty * l.rate - (l.discount || 0));
+      if (l.deviceId) {
+        return `<div class="cart-line is-phone" data-i="${i}">
+        <div class="info btn-line" role="button" tabindex="0"><div class="name"><i class="bi bi-phone me-1 text-primary"></i>${esc(l.name)}</div>
+          <div class="meta">IMEI ${esc(l.imei)} · ${fmtNum(l.rate)}${l.discount ? ` · disc ${fmtNum(l.discount)}` : ''} · ${l.warrantyDays ? `${l.warrantyDays}d warranty` : 'no warranty'}</div></div>
+        <div class="qty-ctl phone-qty"><button class="btn-rm-phone" aria-label="Remove phone"><i class="bi bi-x-lg"></i></button></div>
+        <div class="amt money">${fmtNum(amt)}</div></div>`;
+      }
       return `<div class="cart-line" data-i="${i}">
         <div class="info btn-line" role="button" tabindex="0">
           <div class="name">${esc(l.name)}</div>
@@ -107,7 +117,7 @@ function renderLines() {
 function renderTotals() {
   const t = totals();
   $root.find('.total').text(`${cur()} ${fmtNum(t.total)}`);
-  $root.find('.footer-sub').html(`<span>${st.lines.length} item(s) · qty ${fmtQty(t.qtyTotal)}</span><span>${t.discount ? `Disc ${fmtNum(t.discount)} · ` : ''}${t.tax ? `Tax ${fmtNum(t.tax)}` : ''}</span>`);
+  $root.find('.footer-sub').html(`<span>${st.lines.length} item(s) · qty ${fmtQty(t.qtyTotal)}</span><span>${t.discount ? `Disc ${fmtNum(t.discount)} · ` : ''}${t.tax ? `Tax ${fmtNum(t.tax)}` : ''}${st.tradeIn ? ` Trade-in −${fmtNum(st.tradeIn.value)}` : ''}</span>`);
   $root.find('.btn-pay').prop('disabled', !st.lines.length);
   $root.find('.party-name').text(st.partyName || (isSale() ? 'Walk-in Customer' : 'Select supplier'));
   $root.find('.pm-label').text(st.priceMode === 'retail' ? 'wholesale' : 'retail');
@@ -159,7 +169,24 @@ function addProduct(p, qty = 1) {
   if (isSale() && !st.editId && p.trackStock !== false && !s.allowNegativeStock && st.lines[0].qty > (p.stock || 0)) UI.toast(`Only ${fmtQty(p.stock)} in stock for ${p.name}`, 'warning', 2500);
 }
 
+function addDevice(d) {
+  if (!d) return;
+  if (st.lines.some((l) => l.deviceId === d.id)) { UI.toast('That phone is already in the cart', 'warning'); return; }
+  st.lines.unshift({ deviceId: d.id, imei: d.imei1, productId: null, name: deviceName(d), unit: 'pc', qty: 1, rate: d.salePrice || 0, discount: 0, warrantyDays: Posting.defaultWarranty(d.condition) });
+  renderLines();
+  $root.find('.cart-line').first().addClass('bg-success-subtle');
+  setTimeout(() => $root.find('.cart-line').first().removeClass('bg-success-subtle'), 400);
+  if (!(d.salePrice > 0)) { UI.toast('This phone has no selling price. Tap the line to set one.', 'warning', 3500); }
+}
+
+async function pickPhone() {
+  const hit = await UI.pick({ title: 'Phones in stock', placeholder: 'Search IMEI, model, brand, colour…',
+    search: async (q) => Catalog.searchDevices(q, { limit: 40 }).map((d) => ({ id: d.id, title: deviceName(d), subtitle: `IMEI ${d.imei1} · ${CONDITIONS[d.condition]?.short || ''} · ${PTA[d.pta]?.short || ''}`, right: fmtNum(d.salePrice), value: d })) });
+  if (hit) addDevice(hit.value);
+}
+
 function addByCode(code) {
+  if (isSale()) { const d = Catalog.findDeviceByCode(code); if (d) { UI.beep(); addDevice(d); return true; } }
   const p = Catalog.findByCode(code);
   if (p) { UI.beep(); addProduct(p); return true; }
   UI.toast(`No product found for "${code}"`, 'warning');
@@ -172,16 +199,42 @@ let results = [];
 const doSearch = debounce(() => {
   const q = $root.find('.pos-q').val().trim();
   if (!q) return hideResults();
-  results = Catalog.searchProducts(q, { limit: 25 });
-  $root.find('.search-results').removeClass('d-none').html(results.length ? results.map((p, i) => `
+  results = [...(isSale() ? Catalog.searchDevices(q, { limit: 6 }).map((d) => ({ _device: d })) : []), ...Catalog.searchProducts(q, { limit: 25 })];
+  $root.find('.search-results').removeClass('d-none').html(results.length ? results.map((p, i) => p._device ? `
+    <button class="list-row ${i === 0 ? 'bg-body-secondary' : ''}" data-i="${i}">
+      <div class="main"><div class="title"><i class="bi bi-phone me-1 text-primary"></i>${esc(deviceName(p._device))}</div><div class="sub">IMEI ${esc(p._device.imei1)} · ${esc(CONDITIONS[p._device.condition]?.short || '')} · ${esc(PTA[p._device.pta]?.short || '')}</div></div>
+      <div class="end"><div class="fw-semibold money">${fmtNum(p._device.salePrice)}</div><div class="sub">phone</div></div></button>` : `
     <button class="list-row ${i === 0 ? 'bg-body-secondary' : ''}" data-i="${i}">
       <div class="main"><div class="title">${esc(p.name)}</div><div class="sub">${esc([p.sku, p.barcode].filter(Boolean).join(' · '))}</div></div>
       <div class="end"><div class="fw-semibold money">${fmtNum(priceOf(p))}</div>${p.trackStock !== false ? `<div class="sub">stock ${fmtQty(p.stock)}</div>` : ''}</div>
     </button>`).join('') : `<div class="p-3 text-body-secondary small">No products match "${esc(q)}".${Auth.can('product.edit') ? ' <a href="#" class="quick-add-link">Add new product</a>' : ''}</div>`);
 }, 120);
 
+async function editPhoneLine(i) {
+  const l = st.lines[i];
+  const dev = Catalog.device(l.deviceId) || await idb.get('devices', l.deviceId);
+  const r = await UI.formModal({
+    title: l.name, submitLabel: 'Update',
+    body: `<div class="row g-2"><div class="col-12 small text-body-secondary">IMEI ${esc(l.imei)}${dev ? ` · ${esc(CONDITIONS[dev.condition]?.label || '')} · ${esc(PTA[dev.pta]?.label || '')}` : ''}</div>
+      <div class="col-4"><label class="form-label">Price</label><input name="rate" class="form-control form-control-lg" inputmode="decimal" value="${l.rate}"></div>
+      <div class="col-4"><label class="form-label">Discount</label><input name="discount" class="form-control form-control-lg" inputmode="decimal" value="${l.discount || 0}"></div>
+      <div class="col-4"><label class="form-label">Warranty (days)</label><input name="warrantyDays" class="form-control form-control-lg" inputmode="numeric" value="${l.warrantyDays ?? 0}"></div>
+      ${dev && Auth.can('reports.profit') ? `<div class="col-12 small text-body-secondary">Your cost ${fmtNum(dev.costTotal)} · listed at ${fmtNum(dev.salePrice)}</div>` : ''}
+      <div class="col-12"><button type="button" class="btn btn-outline-danger w-100 btn-remove-line"><i class="bi bi-trash me-1"></i>Remove phone</button></div></div>`,
+    onShown: ($m) => { $m.find('[name=rate]').trigger('select'); $m.find('.btn-remove-line').on('click', () => { st.lines.splice(i, 1); renderLines(); $m.find('[data-bs-dismiss=modal]').first().trigger('click'); }); },
+    onSubmit: (v) => {
+      const rate = round2(num(v.rate)); const discount = round2(num(v.discount)); const w = Math.max(0, Math.round(num(v.warrantyDays)));
+      if (rate < 0) throw new AppError('Price cannot be negative.');
+      if (discount < 0 || discount > rate) throw new AppError('Discount must be between 0 and the price.');
+      return { rate, discount, warrantyDays: w };
+    },
+  });
+  if (r && st.lines[i] === l) { Object.assign(l, r); renderLines(); }
+}
+
 async function editLine(i) {
   const l = st.lines[i];
+  if (l.deviceId) return editPhoneLine(i);
   const p = Catalog.product(l.productId);
   const r = await UI.formModal({
     title: l.name, submitLabel: 'Update',
@@ -234,6 +287,7 @@ async function checkout() {
         <div class="col-6"><label class="form-label">Pay via</label><select name="account" class="form-select">${UI.options(payAccounts, st.payAccount || lastAcc)}</select></div>
       </div>
       <div class="small text-body-secondary co-breakdown mb-2"></div>
+      ${sale && st.lines.some((l) => l.deviceId || true) ? `<button type="button" class="btn btn-outline-secondary w-100 text-start mb-2 co-trade"><i class="bi bi-arrow-left-right me-2"></i><span class="co-trade-label"></span><span class="float-end text-body-secondary small">Trade-in</span></button>` : ''}
       <label class="form-label">${sale ? 'Amount received' : 'Amount paid'}</label>
       <input name="tendered" class="form-control form-control-lg mb-2 money" inputmode="decimal" placeholder="0">
       <div class="d-flex flex-wrap gap-2 pay-quick mb-2"></div>
@@ -251,16 +305,20 @@ async function checkout() {
   const $m = m.$el;
   let tenderedTouched = st.tendered !== null && st.editId;
   const calc = () => Posting.previewDoc(st.lines, num($m.find('[name=discount]').val()), taxRate());
+  const tradeVal = () => (sale && st.tradeIn ? st.tradeIn.value : 0);
   const update = () => {
     const c = calc();
     $m.find('.co-party span').text(st.partyName || (sale ? 'Walk-in Customer' : 'No supplier (cash purchase)'));
     if (!c) { $m.find('.co-total').text('—'); $m.find('.co-result').attr('class', 'alert alert-danger py-2 mb-2 co-result').text('Discount cannot exceed the subtotal.'); $m.find('.co-complete').prop('disabled', true); return; }
-    $m.find('.co-total').text(`${cur()} ${fmtNum(c.total)}`);
-    $m.find('.co-breakdown').text(`Subtotal ${fmtNum(c.subtotal)}${c.discount ? ` − discount ${fmtNum(c.discount)}` : ''}${c.tax ? ` + tax ${fmtNum(c.tax)} (${c.taxRate}%)` : ''}`);
+    const tv = Math.min(tradeVal(), c.total); const payable = round2(c.total - tv);
+    $m.find('.co-total').text(`${cur()} ${fmtNum(payable)}`);
+    $m.find('.co-breakdown').text(`Subtotal ${fmtNum(c.subtotal)}${c.discount ? ` − discount ${fmtNum(c.discount)}` : ''}${c.tax ? ` + tax ${fmtNum(c.tax)} (${c.taxRate}%)` : ''}${tv ? ` − trade-in ${fmtNum(tv)}` : ''}`);
+    $m.find('.co-trade-label').html(st.tradeIn ? `<b>${esc(st.tradeIn.device.brand)} ${esc(st.tradeIn.device.model)}</b> · IMEI ${esc(st.tradeIn.device.imei1)} · <b>${cur()} ${fmtNum(st.tradeIn.value)}</b>` : 'Customer gives an old phone as part payment');
+    $m.find('.co-trade').toggleClass('btn-outline-secondary', !st.tradeIn).toggleClass('btn-info', !!st.tradeIn);
     const $tin = $m.find('[name=tendered]');
-    if (!tenderedTouched) $tin.val(st.partyId ? (st.tendered ?? '') : c.total);
+    if (!tenderedTouched) $tin.val(st.partyId ? (st.tendered ?? '') : payable);
     const tendered = num($tin.val());
-    const diff = round2(tendered - c.total);
+    const diff = round2(tendered - payable);
     let cls = 'success'; let msg;
     if (diff >= 0) msg = sale ? `Change: <b>${cur()} ${fmtNum(diff)}</b>` : (diff > 0 ? '<b>Paid amount exceeds total</b>' : 'Fully paid');
     else if (st.partyId) { cls = 'warning'; msg = `${sale ? 'Balance due' : 'Payable'}: <b>${cur()} ${fmtNum(-diff)}</b> (added to ${sale ? 'customer' : 'supplier'} account)`; }
@@ -268,8 +326,8 @@ async function checkout() {
     if (!sale && diff > 0) cls = 'danger';
     $m.find('.co-result').attr('class', `alert alert-${cls} py-2 mb-2 co-result`).html(msg);
     $m.find('.co-complete').prop('disabled', cls === 'danger');
-    const quick = new Set([c.total]);
-    if (sale) [10, 50, 100, 500, 1000, 5000].forEach((u) => { const v = Math.ceil(c.total / u) * u; if (v > c.total && quick.size < 5) quick.add(v); });
+    const quick = new Set([payable]);
+    if (sale) [10, 50, 100, 500, 1000, 5000].forEach((u) => { const v = Math.ceil(payable / u) * u; if (v > payable && quick.size < 5) quick.add(v); });
     $m.find('.pay-quick').html([...quick].map((v, i) => `<button type="button" class="btn btn-outline-primary" data-v="${v}">${i === 0 ? 'Exact' : fmtNum(v)}</button>`).join('')
       + (st.partyId ? `<button type="button" class="btn btn-outline-secondary" data-v="0">${sale ? 'Credit' : 'Unpaid'}</button>` : ''));
   };
@@ -280,6 +338,21 @@ async function checkout() {
     const base = Posting.previewDoc(st.lines, 0, 0)?.subtotal || 0;
     const pct = prompt('Discount percent (%)', '');
     if (pct !== null && num(pct) >= 0 && num(pct) <= 100) { $m.find('[name=discount]').val(round2(base * num(pct) / 100)); update(); }
+  });
+  $m.on('click', '.co-trade', async () => {
+    if (st.tradeIn) {
+      if (await UI.confirmDialog('Remove the trade-in phone from this bill?', { okLabel: 'Remove' })) { st.tradeIn = null; tenderedTouched = false; update(); }
+      return;
+    }
+    m.bs.hide(); await new Promise((r) => $m.one('hidden.bs.modal', r));
+    const { deviceModal } = await import('./phones.js');
+    const d = await deviceModal({ condition: 'used' }, { title: 'Trade-in phone (taken from customer)', costLabel: 'Trade-in value', submitLabel: 'Use as part payment', seller: !st.partyId });
+    if (d) {
+      const t = calc();
+      if (t && d.cost > t.total) UI.toast('Trade-in value is more than the bill total', 'warning');
+      else st.tradeIn = { device: d, value: d.cost };
+    }
+    m.bs.show(); tenderedTouched = false; update();
   });
   $m.on('click', '.co-party', async () => {
     m.bs.hide(); await new Promise((r) => $m.one('hidden.bs.modal', r));
@@ -311,6 +384,7 @@ async function checkout() {
         id: st.id, editId: st.editId, date: st.date, items: st.lines, discount: st.discount, taxRate: taxRate(),
         tendered: num($m.find('[name=tendered]').val()), paymentAccountId: account, note: st.note, refNo: st.refNo,
         customerId: sale ? st.partyId : undefined, supplierId: sale ? undefined : st.partyId,
+        tradeIn: sale && st.tradeIn ? { device: st.tradeIn.device, value: st.tradeIn.value } : null,
       };
       const { doc, duplicate } = sale ? await Posting.saveSale(input) : await Posting.savePurchase(input);
       const doPrint = sale && $m.find('#co-print').prop('checked');
@@ -392,7 +466,8 @@ export default {
       st = { ...fresh(mode), id: doc.id, editId: doc.id, editNumber: doc.number, date: doc.date, partyId: doc.customerId || doc.supplierId || null,
         partyName: doc.customerId ? doc.customerName : doc.supplierId ? doc.supplierName : '', discount: doc.discount, note: doc.note || '', refNo: doc.refNo || '',
         tendered: mode === 'sale' ? doc.tendered : doc.paid, taxRate: doc.taxRate || 0, payAccount: doc.paymentAccountId,
-        lines: items.map((i) => ({ productId: i.productId, name: i.name, unit: i.unit, qty: i.qty, rate: i.rate, discount: i.discount })) };
+        tradeIn: doc.tradeIn ? { device: doc.tradeIn.device, value: doc.tradeIn.value } : null,
+        lines: items.map((i) => ({ productId: i.productId, deviceId: i.deviceId || undefined, imei: i.imei || undefined, warrantyDays: i.warrantyDays, name: i.name, unit: i.unit, qty: i.qty, rate: i.rate, discount: i.discount })) };
       setTitle(`Edit ${doc.number}`);
     } else {
       st = fresh(mode);
@@ -411,13 +486,19 @@ export default {
         e.preventDefault();
         const q = $q.val().trim();
         if (!q) return;
+        const dev = isSale() ? Catalog.findDeviceByCode(q) : null;
         const exact = Catalog.findByCode(q);
-        if (exact) { addProduct(exact); UI.beep(); }
-        else { const r = Catalog.searchProducts(q, { limit: 2 }); if (r.length) addProduct(r[0]); else { UI.toast(`No product found for "${q}"`, 'warning'); return; } }
+        if (dev) { addDevice(dev); UI.beep(); }
+        else if (exact) { addProduct(exact); UI.beep(); }
+        else {
+          const dr = isSale() ? Catalog.searchDevices(q, { limit: 1 }) : [];
+          const r = Catalog.searchProducts(q, { limit: 2 });
+          if (dr.length && (!r.length || /\d{4,}/.test(q))) addDevice(dr[0]); else if (r.length) addProduct(r[0]); else { UI.toast(`Nothing found for "${q}"`, 'warning'); return; }
+        }
         $q.val(''); hideResults();
       } else if (e.key === 'Escape') { $q.val(''); hideResults(); }
     });
-    $root.on('click', '.search-results [data-i]', function () { addProduct(results[+this.dataset.i]); $q.val(''); hideResults(); $q.trigger('focus'); });
+    $root.on('click', '.search-results [data-i]', function () { const r = results[+this.dataset.i]; if (r._device) addDevice(r._device); else addProduct(r); $q.val(''); hideResults(); $q.trigger('focus'); });
     $root.on('click', '.quick-add-link', (e) => { e.preventDefault(); quickAdd($q.val().trim()); });
     $(document).on('click.posres', (e) => { if (!$(e.target).closest('.pos-search').length) hideResults(); });
 
@@ -437,6 +518,8 @@ export default {
     $root.on('focus', '.qty-in', function () { this.select(); });
     $root.on('click keydown', '.btn-line', function (e) { if (e.type === 'keydown' && e.key !== 'Enter') return; editLine(+$(this).closest('.cart-line').data('i')); });
     $root.on('click', '.btn-pay', checkout);
+    $root.on('click', '.btn-phones', pickPhone);
+    $root.on('click', '.btn-rm-phone', function () { st.lines.splice(+$(this).closest('.cart-line').data('i'), 1); renderLines(); });
     $root.on('click', '.btn-party', choosePartyFn);
     $root.on('click', '.btn-clear', async () => {
       if (st.editId) { if (await UI.confirmDialog('Discard changes to this document?')) history.back(); return; }
@@ -458,6 +541,13 @@ export default {
       if (!window.matchMedia('(min-width: 992px)').matches) UI.toast('Added', 'success', 800);
     });
     detachWedge = Scanner.attachWedge(addByCode);
+    // "Sell" button on a phone's page hands over the phone id.
+    const pending = sessionStorage.getItem('mobishop.addDevice');
+    if (pending && mode === 'sale' && !st.editId) {
+      sessionStorage.removeItem('mobishop.addDevice');
+      const d = Catalog.device(pending) || await idb.get('devices', pending);
+      if (d && d.status === 'in_stock') addDevice(d);
+    }
   },
   destroy() {
     detachWedge?.(); detachWedge = null;

@@ -38,8 +38,13 @@ export default {
         <div class="col-12"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="allowNegativeStock" id="s-neg" ${s.allowNegativeStock ? 'checked' : ''} ${ro}><label class="form-check-label" for="s-neg">Allow selling when stock is insufficient</label></div></div>
         <div class="col-12"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="updatePurchasePrice" id="s-upp" ${s.updatePurchasePrice ? 'checked' : ''} ${ro}><label class="form-check-label" for="s-upp">Update product cost price from latest purchase</label></div></div>
         <div class="col-12 small text-body-secondary mt-2">Document number prefixes (use a different prefix on each device if several devices sell at the same time)</div>
-        ${[['sale', 'Sale'], ['purchase', 'Purchase'], ['saleReturn', 'Sale return'], ['purchaseReturn', 'Purchase return'], ['receipt', 'Receipt'], ['payment', 'Payment'], ['transfer', 'Transfer'], ['adjustment', 'Adjustment']]
+        ${[['sale', 'Sale'], ['purchase', 'Purchase'], ['saleReturn', 'Sale return'], ['purchaseReturn', 'Purchase return'], ['receipt', 'Receipt'], ['payment', 'Payment'], ['transfer', 'Transfer'], ['adjustment', 'Adjustment'], ['repair', 'Repair job'], ['service', 'Wallet service']]
           .map(([k, l]) => `<div class="col-6 col-md-3"><label class="form-label small">${l}</label><input name="p_${k}" class="form-control form-control-sm" maxlength="12" value="${esc(P[k])}" ${ro} pattern="[A-Za-z0-9]+"></div>`).join('')}
+        ${manage ? '<div class="col-12"><button class="btn btn-primary">Save</button></div>' : ''}</form>`)}
+      ${section('Warranty (mobile shop)', 'shield-check', `<form class="f-warranty row g-2">
+        <div class="col-12 small text-body-secondary">Shop warranty in days, printed on the phone receipt. Set 0 for no warranty.</div>
+        ${[['new', 'New phone'], ['open_box', 'Open box'], ['used', 'Used phone'], ['refurb', 'Refurbished']].map(([k, l]) => `<div class="col-6 col-md-3"><label class="form-label small">${l}</label><input name="w_${k}" class="form-control form-control-sm" inputmode="numeric" value="${esc(s.warranty?.[k] ?? 0)}" ${ro}></div>`).join('')}
+        <div class="col-6 col-md-3"><label class="form-label small">Repair job</label><input name="repairWarrantyDays" class="form-control form-control-sm" inputmode="numeric" value="${esc(s.repairWarrantyDays ?? 30)}" ${ro}></div>
         ${manage ? '<div class="col-12"><button class="btn btn-primary">Save</button></div>' : ''}</form>`)}
       ${section('Appearance', 'palette', `<select class="form-select f-theme"><option value="auto">Follow device</option><option value="light">Light</option><option value="dark">Dark</option></select>`)}
     </div><div class="col-lg-6">
@@ -92,6 +97,13 @@ export default {
       if (!v.name.trim()) return UI.toast('Business name is required', 'warning');
       saveSettings({ business: { name: v.name.trim(), address: v.address.trim(), phone: v.phone.trim(), taxNo: v.taxNo.trim(), footer: v.footer.trim() }, currency: v.currency.trim() || 'Rs' });
       UI.toast('Business profile saved');
+    });
+    $el.on('submit', '.f-warranty', (e) => {
+      e.preventDefault();
+      const v = Object.fromEntries(new FormData(e.target).entries());
+      const days = (x) => Math.max(0, Math.min(3650, Math.round(num(x))));
+      saveSettings({ warranty: { new: days(v.w_new), open_box: days(v.w_open_box), used: days(v.w_used), refurb: days(v.w_refurb) }, repairWarrantyDays: days(v.repairWarrantyDays) });
+      UI.toast('Warranty settings saved');
     });
     $el.on('submit', '.f-sales', (e) => {
       e.preventDefault();

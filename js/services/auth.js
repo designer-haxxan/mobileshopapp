@@ -21,9 +21,9 @@ const GENERIC = 'Login failed. Try again.';
 
 export const ROLES = { admin: 'Owner', manager: 'Manager', cashier: 'Cashier' };
 
-const CASHIER = ['sale.create', 'party.edit', 'voucher.create', 'reports.view'];
+const CASHIER = ['sale.create', 'party.edit', 'voucher.create', 'reports.view', 'repair.manage', 'service.create'];
 const MANAGER = [...CASHIER, 'sale.edit', 'sale.void', 'sale.return', 'purchase.manage', 'product.edit', 'product.delete',
-  'party.delete', 'voucher.void', 'account.manage', 'stock.adjust', 'reports.profit', 'settings.manage', 'backup.export'];
+  'party.delete', 'voucher.void', 'phone.buy', 'phone.edit', 'account.manage', 'stock.adjust', 'reports.profit', 'settings.manage', 'backup.export'];
 const PERMISSIONS = { cashier: CASHIER, manager: MANAGER, admin: ['*'] };
 
 let current = null;

@@ -6,11 +6,13 @@ import { uuid, round2, round3, num, nowISO, today, AppError, clean, lc, fmtQty }
 import { getSettings } from '../core/settings.js';
 import * as Auth from './auth.js';
 import * as Catalog from './catalog.js';
+import { deviceName, cleanImei, imeiProblem, SERVICE_TYPES, REPAIR_STATUS } from '../core/mobile.js';
 
 const EPS = 0.0005;
 const NUMBER_STORE = {
   sale: 'sales', purchase: 'purchases', saleReturn: 'saleReturns', purchaseReturn: 'purchaseReturns',
   receipt: 'vouchers', payment: 'vouchers', transfer: 'vouchers', adjustment: 'adjustments',
+  repair: 'repairs', service: 'services',
 };
 export const ACCOUNT_TYPES = { cash: 'Cash', bank: 'Bank / Wallet', income: 'Income', expense: 'Expense', asset: 'Other Asset', liability: 'Liability', equity: 'Equity' };
 const DEBIT_NORMAL = new Set(['cash', 'bank', 'asset', 'expense', 'customer']);
@@ -24,11 +26,12 @@ export function parseAccount(accId) {
 }
 
 // ---------- helpers ----------
-const newCtx = () => ({ touched: new Set(), parties: [], duplicate: false });
+const newCtx = () => ({ touched: new Set(), parties: [], duplicate: false, devices: false });
 
 async function finish(ctx) {
   if (ctx.touched.size) await Catalog.refreshProducts([...ctx.touched]);
   for (const [kind, id] of ctx.parties) await Catalog.refreshParty(kind, id);
+  if (ctx.devices) await Catalog.refreshDevices();
   document.dispatchEvent(new CustomEvent('data:changed'));
 }
 
@@ -125,7 +128,7 @@ export function previewDoc(items, billDiscount, taxRate) {
 }
 
 // ---------- SALES ----------
-const SALE_STORES = ['sales', 'saleItems', 'products', 'stockMoves', 'entries', 'meta', 'customers', 'accounts', 'saleReturns', 'auditLog'];
+const SALE_STORES = ['sales', 'saleItems', 'products', 'stockMoves', 'entries', 'meta', 'customers', 'accounts', 'saleReturns', 'auditLog', 'devices'];
 
 export async function saveSale(input) {
   const editing = !!input.editId;
@@ -137,8 +140,13 @@ export async function saveSale(input) {
   const customerId = input.customerId || null;
   const tendered = round2(num(input.tendered));
   if (tendered < 0) throw new AppError('Paid amount cannot be negative.');
-  const paid = round2(Math.min(tendered, calc.total));
-  if (!customerId && paid < calc.total - 0.001) throw new AppError('Walk-in sales must be fully paid. Select a customer to sell on credit.');
+  const tradeIn = input.tradeIn?.device ? { device: input.tradeIn.device, value: round2(num(input.tradeIn.value)) } : null;
+  if (tradeIn && (!(tradeIn.value > 0) || tradeIn.value > calc.total + 0.001)) throw new AppError('Trade-in value must be more than zero and not more than the bill total.');
+  const tradeValue = tradeIn ? tradeIn.value : 0;
+  const payable = round2(calc.total - tradeValue);
+  const paid = round2(Math.min(tendered, payable));
+  if (!customerId && paid < payable - 0.001) throw new AppError('Walk-in sales must be fully paid. Select a customer to sell on credit.');
+  for (const l of calc.lines) if (l.deviceId && l.qty !== 1) throw new AppError('A phone is sold one at a time (quantity 1).');
   const ctx = newCtx();
 
   const sale = await idb.write(SALE_STORES, async (t) => {
@@ -149,6 +157,7 @@ export async function saveSale(input) {
       if (existing.status === 'void') throw new AppError('A voided sale cannot be edited.');
       if (await t.countByIndex('saleReturns', 'saleId', id)) throw new AppError('This sale has returns and can no longer be edited.');
       await revertDoc(t, ctx, id);
+      await revertDevices(t, ctx, id);
       await t.deleteByIndex('saleItems', 'saleId', id);
     }
     let customerName = 'Walk-in Customer';
@@ -164,14 +173,27 @@ export async function saveSale(input) {
       id, number, date: input.date || existing?.date || today(), createdAt: existing?.createdAt || now, updatedAt: now,
       customerId, customerName, itemCount: calc.lines.length, qtyTotal: calc.qtyTotal,
       subtotal: calc.subtotal, discount: calc.discount, taxRate: calc.taxRate, tax: calc.tax, total: calc.total,
-      tendered, paid, change: round2(Math.max(0, tendered - calc.total)), balance: round2(calc.total - paid),
+      tendered, paid, change: round2(Math.max(0, tendered - payable)), balance: round2(payable - paid), tradeValue,
       paymentAccountId: acc.id, paymentAccountName: acc.name,
-      paymentType: paid >= calc.total ? 'paid' : paid > 0 ? 'partial' : 'credit',
+      paymentType: paid >= payable ? 'paid' : paid > 0 ? 'partial' : 'credit',
       status: 'completed', note: clean(input.note, 500), edited: editing || !!existing?.edited, ...stamp(),
     };
     await t.put('sales', doc);
     let i = 0;
     for (const l of calc.lines) {
+      if (l.deviceId) {
+        const d = await t.get('devices', l.deviceId);
+        if (!d) throw new AppError('A phone in the cart no longer exists.');
+        if (d.status !== 'in_stock') throw new AppError(`${deviceName(d)} (IMEI ${d.imei1}) is no longer in stock.`);
+        const wd = l.warrantyDays === undefined || l.warrantyDays === '' ? defaultWarranty(d.condition) : Math.max(0, Math.round(num(l.warrantyDays)));
+        await t.add('saleItems', { id: uuid(), saleId: id, saleNo: number, date: doc.date, line: i++, productId: null, deviceId: d.id, imei: d.imei1, imei2: d.imei2 || '',
+          name: deviceName(d), sku: 'IMEI ' + d.imei1, unit: 'pc', qty: 1, rate: l.rate, discount: l.discount, amount: l.amount, cost: round2(d.costTotal || 0),
+          condition: d.condition, pta: d.pta, warrantyDays: wd });
+        Object.assign(d, { status: 'sold', saleId: id, saleNo: number, soldAt: now, soldDate: doc.date, soldPrice: l.amount, customerId, customerName, warrantyDays: wd, updatedAt: now });
+        addHist(d, 'sold', number, `Sold to ${customerName} for ${l.amount}`);
+        await t.put('devices', d); ctx.devices = true;
+        continue;
+      }
       const p = await t.get('products', l.productId);
       if (!p) throw new AppError('A product in the cart no longer exists.');
       if (!p.active && !editing) throw new AppError(`"${p.name}" is inactive.`);
@@ -182,10 +204,19 @@ export async function saveSale(input) {
     }
     const net = round2(calc.total - calc.tax);
     const C = customerId && partyAccount('customers', customerId);
+    let tradeLines = [];
+    if (tradeIn) {
+      const [td] = await createDevices(t, ctx, { id, number, date: doc.date }, [{ ...tradeIn.device, cost: tradeValue }],
+        { source: 'trade-in', seller: { name: customerId ? customerName : (tradeIn.device.sellerName || ''), cnic: tradeIn.device.sellerCnic, phone: tradeIn.device.sellerPhone } });
+      doc.tradeIn = { value: tradeValue, deviceId: td.id, name: deviceName(td), imei: td.imei1, device: tradeIn.device };
+      await t.put('sales', doc);
+      tradeLines = [['purchases', tradeValue, 0, 'Trade-in phone ' + td.imei1]];
+      if (customerId) tradeLines.push([C, 0, tradeValue, 'Trade-in phone credit']);
+    }
     await addEntries(t, doc, 'sale', customerId ? [
       [C, calc.total, 0, 'Sale'], ['sales', 0, net, 'Sale'], ['tax', 0, calc.tax, 'Sales tax'],
-      [acc.id, paid, 0, 'Payment received'], [C, 0, paid, 'Payment received'],
-    ] : [[acc.id, calc.total, 0, 'Cash sale'], ['sales', 0, net, 'Sale'], ['tax', 0, calc.tax, 'Sales tax']]);
+      [acc.id, paid, 0, 'Payment received'], [C, 0, paid, 'Payment received'], ...tradeLines,
+    ] : [[acc.id, paid, 0, 'Cash sale'], ['sales', 0, net, 'Sale'], ['tax', 0, calc.tax, 'Sales tax'], ...tradeLines]);
     await audit(t, editing ? 'sale_edited' : 'sale_created', { number, total: calc.total });
     return doc;
   });
@@ -216,6 +247,7 @@ export async function savePurchase(input) {
       if (!existing) throw new AppError('Purchase not found.');
       if (existing.status === 'void') throw new AppError('A voided purchase cannot be edited.');
       if (await t.countByIndex('purchaseReturns', 'purchaseId', id)) throw new AppError('This purchase has returns and can no longer be edited.');
+      if (existing.kind === 'device') throw new AppError('Phone purchases cannot be edited. Void it and enter it again.');
       await revertDoc(t, ctx, id);
       await t.deleteByIndex('purchaseItems', 'purchaseId', id);
     }
@@ -290,7 +322,7 @@ export async function saveReturn(kind, input) {
     ? ['sales', 'saleItems', 'saleReturns', 'saleId', 'customers', 'customerId']
     : ['purchases', 'purchaseItems', 'purchaseReturns', 'purchaseId', 'suppliers', 'supplierId'];
   const ctx = newCtx();
-  const ret = await idb.write([docStore, itemStore, retStore, 'products', 'stockMoves', 'entries', 'meta', 'accounts', 'auditLog'], async (t) => {
+  const ret = await idb.write([docStore, itemStore, retStore, 'products', 'stockMoves', 'entries', 'meta', 'accounts', 'auditLog', 'devices'], async (t) => {
     const existing = await t.get(retStore, input.id);
     if (existing) { ctx.duplicate = true; return existing; }
     const src = await t.get(docStore, input.docId);
@@ -307,7 +339,7 @@ export async function saveReturn(kind, input) {
       const remaining = round3(it.qty - (done[it.id] || 0));
       if (qty > remaining + EPS) throw new AppError(`Cannot return ${fmtQty(qty)} of "${it.name}" (max ${fmtQty(remaining)}).`);
       const amount = round2(it.amount * factor * qty / it.qty);
-      lines.push({ lineId: it.id, productId: it.productId, name: it.name, unit: it.unit, qty, rate: round2(amount / qty), amount, lineAmount: round2(it.amount * qty / it.qty), cost: isSale ? it.cost : it.unitCost });
+      lines.push({ lineId: it.id, productId: it.productId, deviceId: it.deviceId || null, imei: it.imei || '', name: it.name, unit: it.unit, qty, rate: round2(amount / qty), amount, lineAmount: round2(it.amount * qty / it.qty), cost: isSale ? it.cost : it.unitCost });
     }
     if (!lines.length) throw new AppError('Enter a quantity to return.');
     const total = round2(lines.reduce((s, l) => s + l.amount, 0));
@@ -325,6 +357,21 @@ export async function saveReturn(kind, input) {
     };
     await t.add(retStore, doc);
     for (const l of lines) {
+      if (l.deviceId) {
+        const d = await t.get('devices', l.deviceId);
+        if (!d) throw new AppError('The phone record no longer exists.');
+        if (isSale) {
+          if (d.status !== 'sold' || d.saleId !== src.id) throw new AppError(`${deviceName(d)} is not currently sold on this bill.`);
+          Object.assign(d, { status: 'in_stock', saleId: null, saleNo: '', soldAt: null, soldDate: null, soldPrice: 0, customerId: null, customerName: '', updatedAt: nowISO() });
+          addHist(d, 'sale_return', number, 'Returned by customer');
+        } else {
+          if (d.status !== 'in_stock') throw new AppError(`${deviceName(d)} must be in stock to return it to the supplier.`);
+          Object.assign(d, { status: 'returned_supplier', updatedAt: nowISO() });
+          addHist(d, 'purchase_return', number, 'Returned to supplier');
+        }
+        await t.put('devices', d); ctx.devices = true;
+        continue;
+      }
       await moveStock(t, ctx, { productId: l.productId, qty: isSale ? l.qty : -l.qty, type: isSale ? 'sale_return' : 'purchase_return', doc, cost: l.cost });
     }
     if (partyId) ctx.parties.push([partyStore, partyId]);
@@ -356,13 +403,14 @@ const VOID_DEF = {
   purchaseReturn: { store: 'purchaseReturns', perm: 'purchase.manage', party: ['suppliers', 'supplierId'] },
   voucher: { store: 'vouchers', perm: 'voucher.void' },
   adjustment: { store: 'adjustments', perm: 'stock.adjust' },
+  service: { store: 'services', perm: 'service.create' },
 };
 
 export async function voidDocument(kind, id, reason = '') {
   const def = VOID_DEF[kind];
   Auth.require(def.perm);
   const ctx = newCtx();
-  const stores = [def.store, 'products', 'stockMoves', 'entries', 'auditLog', ...(def.items ? [def.items, def.returns] : [])];
+  const stores = [def.store, 'products', 'stockMoves', 'entries', 'auditLog', 'devices', ...(def.items ? [def.items, def.returns] : [])];
   const doc = await idb.write(stores, async (t) => {
     const d = await t.get(def.store, id);
     if (!d) throw new AppError('Document not found.');
@@ -372,6 +420,23 @@ export async function voidDocument(kind, id, reason = '') {
       if (rets.length) throw new AppError('Void the returns of this document first.');
     }
     await revertDoc(t, ctx, id);
+    if (kind === 'sale' || kind === 'purchase') await revertDevices(t, ctx, id);
+    if (kind === 'saleReturn' || kind === 'purchaseReturn') {
+      for (const it of d.items || []) {
+        if (!it.deviceId) continue;
+        const dv = await t.get('devices', it.deviceId);
+        if (!dv) continue;
+        if (kind === 'saleReturn') {
+          if (dv.status !== 'in_stock') throw new AppError(`${deviceName(dv)} has been sold again; it cannot be put back on the original bill.`);
+          Object.assign(dv, { status: 'sold', saleId: d.saleId, updatedAt: nowISO() });
+        } else {
+          if (dv.status !== 'returned_supplier') throw new AppError(`${deviceName(dv)} is not marked as returned to the supplier.`);
+          Object.assign(dv, { status: 'in_stock', updatedAt: nowISO() });
+        }
+        addHist(dv, 'return_voided', d.number, 'Return voided');
+        await t.put('devices', dv); ctx.devices = true;
+      }
+    }
     if (def.items) {
       d.voidedItems = await t.getAllByIndex(def.items, def.fk, id);
       await t.deleteByIndex(def.items, def.fk, id);
@@ -431,6 +496,417 @@ export async function saveVoucher(input) {
   await finish(ctx);
   return { doc, duplicate: ctx.duplicate };
 }
+
+// ---------- PHONES (IMEI-tracked devices) ----------
+const addHist = (d, type, ref, note = '') => { (d.history ||= []).push({ at: nowISO(), type, ref: ref || '', note, by: Auth.user()?.name || '' }); };
+export const defaultWarranty = (condition) => {
+  const w = getSettings().warranty || {};
+  return Math.max(0, Math.round(num(w[condition], condition === 'new' ? 30 : 7)));
+};
+
+async function findDevice(t, imei) {
+  const a = await t.getAllByIndex('devices', 'imei1', imei);
+  if (a.length) return a[0];
+  return (await t.getAllByIndex('devices', 'imei2', imei))[0] || null;
+}
+
+// Creates (or revives, if the same IMEI was sold earlier) one device record per entry. Runs inside a caller's transaction.
+async function createDevices(t, ctx, doc, list, { source = 'supplier', seller = {}, supplierId = null } = {}) {
+  const now = nowISO(); const out = []; const seen = new Set();
+  for (const x of list) {
+    const imei1 = cleanImei(x.imei1); const imei2 = cleanImei(x.imei2);
+    const brand = clean(x.brand, 40); const model = clean(x.model, 80);
+    if (!brand || !model) throw new AppError('Brand and model are required for every phone.');
+    let msg = imeiProblem(imei1); if (msg) throw new AppError(`${brand} ${model}: ${msg}`);
+    msg = imeiProblem(imei2, { required: false }); if (msg) throw new AppError(`${brand} ${model} (IMEI 2): ${msg}`);
+    for (const m of [imei1, imei2].filter(Boolean)) { if (seen.has(m)) throw new AppError(`IMEI ${m} is entered twice.`); seen.add(m); }
+    const cost = round2(num(x.cost));
+    if (cost < 0) throw new AppError('Cost cannot be negative.');
+    let existing = null;
+    for (const m of [imei1, imei2].filter(Boolean)) {
+      const e = await findDevice(t, m);
+      if (!e) continue;
+      if (e.status === 'in_stock') throw new AppError(`IMEI ${m} is already in stock (${deviceName(e)}).`);
+      existing = existing || e;
+    }
+    const base = existing ? { ...existing } : { id: uuid(), createdAt: now, history: [] };
+    const dev = { ...base, imei1, imei2, brand, model, storage: clean(x.storage, 20), ram: clean(x.ram, 20), color: clean(x.color, 30),
+      condition: x.condition || 'used', pta: x.pta || 'unknown', battery: clean(x.battery, 10), accessories: clean(x.accessories, 120), notes: clean(x.notes, 300),
+      purchasePrice: cost, extraCost: 0, costTotal: cost, salePrice: round2(num(x.salePrice)), status: 'in_stock',
+      purchaseId: doc.id, purchaseNo: doc.number, purchaseDate: doc.date, source, supplierId,
+      sellerName: clean(seller.name ?? x.sellerName, 100), sellerCnic: clean(seller.cnic ?? x.sellerCnic, 20), sellerPhone: clean(seller.phone ?? x.sellerPhone, 30), sellerAddress: clean(seller.address ?? x.sellerAddress, 200),
+      saleId: null, saleNo: '', soldAt: null, soldDate: null, soldPrice: 0, customerId: null, customerName: '', updatedAt: now };
+    addHist(dev, source === 'trade-in' ? 'trade_in' : 'purchased', doc.number, `${source === 'trade-in' ? 'Trade-in' : 'Bought'} for ${cost}${dev.sellerName ? ' from ' + dev.sellerName : ''}`);
+    await t.put('devices', dev); out.push(dev); ctx.devices = true;
+  }
+  return out;
+}
+
+// Undo a document's effect on phones: sold phones go back to stock; phones that document created are removed (only if still in stock).
+async function revertDevices(t, ctx, docId) {
+  for (const d of await t.getAllByIndex('devices', 'saleId', docId)) {
+    Object.assign(d, { status: 'in_stock', saleId: null, saleNo: '', soldAt: null, soldDate: null, soldPrice: 0, customerId: null, customerName: '', updatedAt: nowISO() });
+    addHist(d, 'sale_reverted', '', 'Sale edited or voided');
+    await t.put('devices', d); ctx.devices = true;
+  }
+  for (const d of await t.getAllByIndex('devices', 'purchaseId', docId)) {
+    if (d.status !== 'in_stock') throw new AppError(`${deviceName(d)} (IMEI ${d.imei1}) has already been sold or returned, so this document cannot be changed.`);
+    await t.delete('devices', d.id); ctx.devices = true;
+  }
+}
+
+const cnicProblem = (s) => (s && !/^\d{5}-?\d{7}-?\d$/.test(String(s).trim()) ? 'CNIC must have 13 digits (e.g. 35202-1234567-1).' : '');
+
+// Buy phones: new stock from a supplier/dealer, or a used phone from a walk-in person (seller details are kept for the record).
+export async function saveDevicePurchase(input) {
+  Auth.require('phone.buy');
+  const id = input.id;
+  if (!id) throw new AppError('Missing document id.');
+  const list = input.devices || [];
+  if (!list.length) throw new AppError('Add at least one phone.');
+  const total = round2(list.reduce((s, d) => s + round2(num(d.cost)), 0));
+  const supplierId = input.supplierId || null;
+  const paid = round2(num(input.paid));
+  if (paid < 0 || paid > total + 0.001) throw new AppError('Paid amount must be between 0 and the total.');
+  if (!supplierId && paid < total - 0.001) throw new AppError('Select a supplier for credit purchases, or pay the full amount.');
+  const seller = { name: clean(input.seller?.name, 100), cnic: clean(input.seller?.cnic, 20), phone: clean(input.seller?.phone, 30), address: clean(input.seller?.address, 200) };
+  if (!supplierId && list.some((d) => d.condition !== 'new')) {
+    if (!seller.name) throw new AppError('Enter the seller\'s name — you must keep a record of who sold you a used phone.');
+    if (!seller.cnic && !seller.phone) throw new AppError('Enter the seller\'s CNIC or phone number.');
+  }
+  const cm = cnicProblem(seller.cnic); if (cm) throw new AppError(cm);
+  const ctx = newCtx();
+  const pur = await idb.write([...PUR_STORES, 'devices'], async (t) => {
+    const existing = await t.get('purchases', id);
+    if (existing) { ctx.duplicate = true; return existing; }
+    let supplierName = seller.name || 'Cash Purchase';
+    if (supplierId) {
+      const sp = await t.get('suppliers', supplierId);
+      if (!sp) throw new AppError('Supplier not found.');
+      supplierName = sp.name; ctx.parties.push(['suppliers', supplierId]);
+    }
+    const acc = await paymentAccount(t, input.paymentAccountId);
+    const number = await nextNumber(t, 'purchase');
+    const now = nowISO();
+    const doc = { id, number, kind: 'device', date: input.date || today(), createdAt: now, updatedAt: now, supplierId, supplierName, refNo: clean(input.refNo, 60),
+      itemCount: list.length, qtyTotal: list.length, subtotal: total, discount: 0, tax: 0, total, paid, balance: round2(total - paid),
+      paymentAccountId: acc.id, paymentAccountName: acc.name, status: 'completed', note: clean(input.note, 500), seller, ...stamp() };
+    await t.put('purchases', doc);
+    const devs = await createDevices(t, ctx, doc, list, { source: supplierId ? 'supplier' : 'customer', seller, supplierId });
+    let i = 0;
+    for (const d of devs) {
+      await t.add('purchaseItems', { id: uuid(), purchaseId: id, purchaseNo: number, date: doc.date, line: i++, productId: null, deviceId: d.id, imei: d.imei1,
+        name: deviceName(d), sku: 'IMEI ' + d.imei1, unit: 'pc', qty: 1, rate: d.purchasePrice, discount: 0, amount: d.purchasePrice, unitCost: d.purchasePrice });
+    }
+    const S = supplierId && partyAccount('suppliers', supplierId);
+    await addEntries(t, doc, 'purchase', supplierId ? [
+      ['purchases', total, 0, 'Phone purchase'], [S, 0, total, 'Phone purchase'],
+      [S, paid, 0, 'Payment made'], [acc.id, 0, paid, 'Payment made'],
+    ] : [['purchases', total, 0, 'Phone purchase'], [acc.id, 0, total, 'Phone purchase from ' + (seller.name || 'seller')]]);
+    await audit(t, 'phone_purchase', { number, total, phones: devs.length });
+    return doc;
+  });
+  await finish(ctx);
+  return { doc: pur, duplicate: ctx.duplicate };
+}
+
+// Edit a phone's details/prices. Sold phones: only notes can change.
+export async function updateDevice(id, data) {
+  Auth.require('phone.edit');
+  const ctx = newCtx();
+  const rec = await idb.write(['devices', 'auditLog'], async (t) => {
+    const d = await t.get('devices', id);
+    if (!d) throw new AppError('Phone not found.');
+    if (d.status !== 'in_stock') {
+      d.notes = clean(data.notes, 300); d.updatedAt = nowISO(); await t.put('devices', d); return d;
+    }
+    const imei1 = cleanImei(data.imei1); const imei2 = cleanImei(data.imei2);
+    let msg = imeiProblem(imei1); if (msg) throw new AppError(msg);
+    msg = imeiProblem(imei2, { required: false }); if (msg) throw new AppError('IMEI 2: ' + msg);
+    for (const m of [imei1, imei2].filter(Boolean)) { const e = await findDevice(t, m); if (e && e.id !== id) throw new AppError(`IMEI ${m} already belongs to ${deviceName(e)}.`); }
+    const brand = clean(data.brand, 40); const model = clean(data.model, 80);
+    if (!brand || !model) throw new AppError('Brand and model are required.');
+    const extra = round2(num(data.extraCost)); const salePrice = round2(num(data.salePrice));
+    if (extra < 0 || salePrice < 0) throw new AppError('Prices cannot be negative.');
+    const before = { salePrice: d.salePrice, extraCost: d.extraCost };
+    Object.assign(d, { imei1, imei2, brand, model, storage: clean(data.storage, 20), ram: clean(data.ram, 20), color: clean(data.color, 30), condition: data.condition || d.condition,
+      pta: data.pta || d.pta, battery: clean(data.battery, 10), accessories: clean(data.accessories, 120), notes: clean(data.notes, 300), salePrice, extraCost: extra,
+      costTotal: round2((d.purchasePrice || 0) + extra), updatedAt: nowISO() });
+    if (before.salePrice !== salePrice || before.extraCost !== extra) addHist(d, 'edited', '', `Sale price ${before.salePrice} → ${salePrice}, extra cost ${before.extraCost || 0} → ${extra}`);
+    await t.put('devices', d); ctx.devices = true;
+    await audit(t, 'update_phone', { imei: imei1 });
+    return d;
+  });
+  await finish(ctx);
+  return rec;
+}
+
+// Find a phone's full record by any IMEI (for the IMEI lookup screen). Reads only.
+export async function lookupImei(imei) {
+  const q = cleanImei(imei);
+  if (!q) return null;
+  return idb.read(['devices'], async (t) => (await t.getAllByIndex('devices', 'imei1', q))[0] || (await t.getAllByIndex('devices', 'imei2', q))[0] || null);
+}
+
+// ---------- REPAIRS (job cards) ----------
+const REPAIR_STORES = ['repairs', 'products', 'stockMoves', 'entries', 'meta', 'accounts', 'customers', 'auditLog'];
+const TERMINAL = ['delivered', 'cancelled'];
+
+export function calcRepair(parts = [], labour = 0) {
+  const lines = parts.map((p) => {
+    const qty = round3(num(p.qty, 1)); const price = round2(num(p.price)); const cost = round2(num(p.cost));
+    if (!(qty > 0) || price < 0 || cost < 0) throw new AppError('Check the part quantity, price and cost.');
+    return { productId: p.productId || null, name: clean(p.name, 120) || 'Part', qty, price, cost, outsideCash: !!p.outsideCash && !p.productId, amount: round2(qty * price) };
+  });
+  const labourAmt = round2(num(labour));
+  if (labourAmt < 0) throw new AppError('Labour charge cannot be negative.');
+  const partsTotal = round2(lines.reduce((s, l) => s + l.amount, 0));
+  return { lines, labour: labourAmt, partsTotal, total: round2(labourAmt + partsTotal), partsCost: round2(lines.reduce((s, l) => s + l.qty * l.cost, 0)) };
+}
+export function previewRepair(parts, labour) { try { return calcRepair(parts, labour); } catch { return null; } }
+
+async function repairPay(t, r, { amount, accountId, accountName, kind, date }) {
+  const amt = round2(amount);
+  if (!amt) return;
+  const p = { id: uuid(), date, amount: amt, accountId, accountName, kind, at: nowISO() };
+  r.payments.push(p); r.paid = round2((r.paid || 0) + amt);
+  const memo = amt > 0 ? (kind === 'final' ? 'Repair payment' : 'Repair advance') : 'Repair refund';
+  await addEntries(t, { id: `${r.id}:p:${p.id.slice(0, 8)}`, number: r.number, date },
+    'repairPay', amt > 0 ? [[accountId, amt, 0, memo], ['repair_advance', 0, amt, memo]] : [['repair_advance', -amt, 0, memo], [accountId, 0, -amt, memo]]);
+}
+const repHist = (r, status, note = '') => { (r.history ||= []).push({ at: nowISO(), status, note, by: Auth.user()?.name || '' }); };
+
+export async function saveRepair(input) {
+  Auth.require('repair.manage');
+  const id = input.id;
+  if (!id) throw new AppError('Missing job id.');
+  const customerName = clean(input.customerName, 100); const customerPhone = clean(input.customerPhone, 30);
+  if (!customerName && !customerPhone) throw new AppError('Enter the customer name or phone number.');
+  const brand = clean(input.brand, 40); const model = clean(input.model, 80);
+  if (!brand && !model) throw new AppError('Enter the phone brand/model.');
+  const imei = cleanImei(input.imei);
+  const im = imeiProblem(imei, { required: false }); if (im) throw new AppError(im);
+  const fault = clean(input.fault, 150);
+  if (!fault) throw new AppError('Select or type the fault.');
+  const estimate = round2(num(input.estimate)); const advance = round2(num(input.advance));
+  if (estimate < 0 || advance < 0) throw new AppError('Amounts cannot be negative.');
+  const ctx = newCtx();
+  const doc = await idb.write(REPAIR_STORES, async (t) => {
+    const existing = await t.get('repairs', id);
+    const now = nowISO();
+    if (existing && !input.editing) { ctx.duplicate = true; return existing; }
+    if (existing && TERMINAL.includes(existing.status)) throw new AppError('A delivered or cancelled job cannot be edited.');
+    const r = existing || { id, number: await nextNumber(t, 'repair'), createdAt: now, status: 'received', date: input.date || today(), parts: [], labour: 0, total: 0, paid: 0, payments: [], history: [], warrantyDays: Math.max(0, Math.round(num(getSettings().repairWarrantyDays, 30))), ...stamp() };
+    let customerId = input.customerId || null;
+    if (customerId && !(await t.get('customers', customerId))) customerId = null;
+    Object.assign(r, { customerId, customerName: customerName || customerPhone, customerPhone, brand, model, imei, color: clean(input.color, 30), fault, faultNotes: clean(input.faultNotes, 400),
+      accessories: clean(input.accessories, 150), lockCode: clean(input.lockCode, 40), existingDamage: clean(input.existingDamage, 200), estimate, expectedDate: input.expectedDate || '',
+      technician: clean(input.technician, 60), priority: input.priority === 'urgent' ? 'urgent' : 'normal', updatedAt: now });
+    if (!existing) repHist(r, 'received', 'Job card created');
+    await t.put('repairs', r);
+    if (!existing && advance > 0) {
+      const acc = await paymentAccount(t, input.paymentAccountId);
+      await repairPay(t, r, { amount: advance, accountId: acc.id, accountName: acc.name, kind: 'advance', date: r.date });
+      await t.put('repairs', r);
+    }
+    if (customerId) ctx.parties.push(['customers', customerId]);
+    await audit(t, existing ? 'repair_updated' : 'repair_created', { number: r.number });
+    return r;
+  });
+  await finish(ctx);
+  return { doc, duplicate: ctx.duplicate };
+}
+
+export async function setRepairStatus(id, status, note = '') {
+  Auth.require('repair.manage');
+  if (!REPAIR_STATUS[status] || TERMINAL.includes(status)) throw new AppError('Invalid status.');
+  const ctx = newCtx();
+  const doc = await idb.write(REPAIR_STORES, async (t) => {
+    const r = await t.get('repairs', id);
+    if (!r) throw new AppError('Job not found.');
+    if (TERMINAL.includes(r.status)) throw new AppError('This job is already closed.');
+    r.status = status; r.updatedAt = nowISO(); repHist(r, status, clean(note, 200));
+    await t.put('repairs', r);
+    return r;
+  });
+  await finish(ctx);
+  return doc;
+}
+
+// Parts, labour, diagnosis and technician notes. Stock is only consumed at delivery.
+export async function saveRepairWork(id, input) {
+  Auth.require('repair.manage');
+  const calc = calcRepair(input.parts || [], input.labour);
+  const ctx = newCtx();
+  const doc = await idb.write(REPAIR_STORES, async (t) => {
+    const r = await t.get('repairs', id);
+    if (!r) throw new AppError('Job not found.');
+    if (TERMINAL.includes(r.status)) throw new AppError('This job is already closed.');
+    Object.assign(r, { parts: calc.lines, labour: calc.labour, total: calc.total, diagnosis: clean(input.diagnosis, 400), technician: clean(input.technician, 60) || r.technician,
+      warrantyDays: Math.max(0, Math.round(num(input.warrantyDays, r.warrantyDays))), updatedAt: nowISO() });
+    repHist(r, r.status, `Charges updated: total ${calc.total}`);
+    await t.put('repairs', r);
+    return r;
+  });
+  await finish(ctx);
+  return doc;
+}
+
+export async function addRepairPayment(id, input) {
+  Auth.require('repair.manage');
+  const amount = round2(num(input.amount));
+  if (!(amount > 0)) throw new AppError('Amount must be greater than zero.');
+  const ctx = newCtx();
+  const doc = await idb.write(REPAIR_STORES, async (t) => {
+    const r = await t.get('repairs', id);
+    if (!r) throw new AppError('Job not found.');
+    if (TERMINAL.includes(r.status)) throw new AppError('This job is already closed.');
+    const acc = await paymentAccount(t, input.accountId);
+    await repairPay(t, r, { amount, accountId: acc.id, accountName: acc.name, kind: 'advance', date: input.date || today() });
+    r.updatedAt = nowISO(); repHist(r, r.status, `Advance received: ${amount}`);
+    await t.put('repairs', r);
+    return r;
+  });
+  await finish(ctx);
+  return doc;
+}
+
+export async function deliverRepair(id, input) {
+  Auth.require('repair.manage');
+  const ctx = newCtx();
+  const doc = await idb.write(REPAIR_STORES, async (t) => {
+    const r = await t.get('repairs', id);
+    if (!r) throw new AppError('Job not found.');
+    if (TERMINAL.includes(r.status)) throw new AppError('This job is already closed.');
+    const calc = calcRepair(r.parts, r.labour);
+    if (!(calc.total > 0)) throw new AppError('Enter the repair charges before delivering the phone.');
+    const date = input.date || today();
+    const acc = await paymentAccount(t, input.accountId);
+    const due = round2(calc.total - r.paid);
+    let pay = round2(num(input.pay));
+    let credit = 0;
+    if (due >= 0) {
+      if (pay < 0 || pay > due + 0.001) throw new AppError('Payment cannot be more than the amount due.');
+      pay = Math.min(pay, due);
+      credit = round2(due - pay);
+      if (credit > 0.001 && !input.customerId && !r.customerId) throw new AppError('Select a customer to leave a balance, or collect the full amount.');
+      if (pay > 0) await repairPay(t, r, { amount: pay, accountId: acc.id, accountName: acc.name, kind: 'final', date });
+    } else {
+      await repairPay(t, r, { amount: due, accountId: acc.id, accountName: acc.name, kind: 'refund', date });
+    }
+    let customerId = null;
+    if (credit > 0.001) {
+      customerId = input.customerId || r.customerId;
+      if (!(await t.get('customers', customerId))) throw new AppError('Customer not found.');
+      r.customerId = customerId; ctx.parties.push(['customers', customerId]);
+    }
+    const docRef = { id: r.id, number: r.number, date };
+    let partsCost = 0; const extra = [];
+    for (const l of calc.lines) {
+      let cost = l.cost;
+      if (l.productId) {
+        const p = await moveStock(t, ctx, { productId: l.productId, qty: -l.qty, type: 'repair', doc: docRef, note: 'Used in ' + r.number });
+        cost = round2(p.purchasePrice || 0);
+      } else if (l.outsideCash && l.cost > 0) {
+        extra.push(['repair_parts', round2(l.qty * l.cost), 0, 'Part bought for ' + r.number], ['cash', 0, round2(l.qty * l.cost), 'Part bought for ' + r.number]);
+      }
+      l.cost = cost; partsCost = round2(partsCost + l.qty * cost);
+    }
+    await addEntries(t, docRef, 'repair', [
+      ['repair_advance', r.paid, 0, 'Repair completed'],
+      ...(credit > 0.001 ? [[partyAccount('customers', customerId), credit, 0, 'Repair balance']] : []),
+      ['repair_income', 0, calc.total, 'Repair ' + r.number], ...extra,
+    ]);
+    Object.assign(r, { parts: calc.lines, total: calc.total, partsCost, status: 'delivered', deliveredAt: nowISO(), deliveredDate: date, balance: credit, updatedAt: nowISO() });
+    repHist(r, 'delivered', credit > 0.001 ? `Delivered with balance ${credit}` : 'Delivered');
+    await t.put('repairs', r);
+    await audit(t, 'repair_delivered', { number: r.number, total: calc.total });
+    return r;
+  });
+  await finish(ctx);
+  return doc;
+}
+
+export async function cancelRepair(id, input = {}) {
+  Auth.require('repair.manage');
+  const ctx = newCtx();
+  const doc = await idb.write(REPAIR_STORES, async (t) => {
+    const r = await t.get('repairs', id);
+    if (!r) throw new AppError('Job not found.');
+    if (TERMINAL.includes(r.status)) throw new AppError('This job is already closed.');
+    const date = input.date || today();
+    const fee = Math.min(round2(num(input.fee)), r.paid);
+    if (fee < 0) throw new AppError('Fee cannot be negative.');
+    if (r.paid > 0) {
+      const acc = await paymentAccount(t, input.accountId);
+      if (r.paid - fee > 0) await repairPay(t, r, { amount: -(r.paid - fee), accountId: acc.id, accountName: acc.name, kind: 'refund', date });
+      if (fee > 0) await addEntries(t, { id: `${r.id}:fee`, number: r.number, date }, 'repair', [['repair_advance', fee, 0, 'Inspection fee'], ['repair_income', 0, fee, 'Inspection fee ' + r.number]]);
+    }
+    r.status = 'cancelled'; r.cancelledAt = nowISO(); r.cancelReason = clean(input.reason, 200); r.updatedAt = nowISO();
+    repHist(r, 'cancelled', r.cancelReason || 'Cancelled');
+    await t.put('repairs', r);
+    await audit(t, 'repair_cancelled', { number: r.number });
+    return r;
+  });
+  await finish(ctx);
+  return doc;
+}
+
+// Reopen a delivered job (e.g. warranty comeback or wrong delivery): revenue and stock use are reversed, advances stay.
+export async function reopenRepair(id) {
+  Auth.require('repair.manage');
+  const ctx = newCtx();
+  const doc = await idb.write(REPAIR_STORES, async (t) => {
+    const r = await t.get('repairs', id);
+    if (!r || r.status !== 'delivered') throw new AppError('Only a delivered job can be reopened.');
+    await revertDoc(t, ctx, id);
+    Object.assign(r, { status: 'ready', deliveredAt: null, deliveredDate: null, balance: 0, partsCost: 0, updatedAt: nowISO() });
+    repHist(r, 'ready', 'Reopened after delivery');
+    await t.put('repairs', r);
+    await audit(t, 'repair_reopened', { number: r.number });
+    if (r.customerId) ctx.parties.push(['customers', r.customerId]);
+    return r;
+  });
+  await finish(ctx);
+  return doc;
+}
+
+// ---------- WALLET / LOAD / BILL SERVICES (Easypaisa, JazzCash, easyload …) ----------
+export async function saveService(input) {
+  Auth.require('service.create');
+  const def = SERVICE_TYPES[input.type];
+  if (!def) throw new AppError('Select the service type.');
+  const amount = round2(num(input.amount)); const fee = round2(num(input.fee)); const commission = round2(num(input.commission));
+  if (!(amount > 0)) throw new AppError('Amount must be greater than zero.');
+  if (fee < 0 || commission < 0) throw new AppError('Fee and commission cannot be negative.');
+  if (!input.walletId) throw new AppError('Select the wallet / load account.');
+  const ctx = newCtx();
+  const doc = await idb.write(['services', 'entries', 'meta', 'accounts', 'auditLog'], async (t) => {
+    const existing = await t.get('services', input.id);
+    if (existing) { ctx.duplicate = true; return existing; }
+    const wallet = await t.get('accounts', input.walletId);
+    if (!wallet || wallet.type !== 'bank' || !wallet.active) throw new AppError('Select a valid wallet account.');
+    const cash = await paymentAccount(t, input.cashAccountId || 'cash');
+    if (cash.id === wallet.id) throw new AppError('Cash account and wallet must be different.');
+    const number = await nextNumber(t, 'service');
+    const d = { id: input.id, number, date: input.date || today(), createdAt: nowISO(), type: input.type, typeLabel: def.short, dir: def.dir,
+      walletId: wallet.id, walletName: wallet.name, cashAccountId: cash.id, cashAccountName: cash.name, amount, fee, commission, income: round2(fee + commission),
+      customerName: clean(input.customerName, 100), customerNumber: clean(input.customerNumber, 40), reference: clean(input.reference, 60), billKind: clean(input.billKind, 60),
+      note: clean(input.note, 300), status: 'completed', ...stamp() };
+    await t.add('services', d);
+    const memo = `${def.short} ${wallet.name}`;
+    const lines = def.dir === 'out'
+      ? [[cash.id, amount + fee, 0, memo], [wallet.id, 0, amount, memo], ['service_income', 0, fee, 'Service fee']]
+      : [[wallet.id, amount + fee, 0, memo], [cash.id, 0, amount, memo], ['service_income', 0, fee, 'Service fee']];
+    if (commission > 0) lines.push([wallet.id, commission, 0, 'Commission'], ['service_income', 0, commission, 'Commission']);
+    await addEntries(t, d, 'service', lines);
+    await audit(t, 'service_created', { number, type: input.type, amount });
+    return d;
+  });
+  await finish(ctx);
+  return { doc, duplicate: ctx.duplicate };
+}
+
 
 // ---------- MASTER DATA ----------
 async function setOpening(t, txnId, accountId, debitAmount, date, label) {

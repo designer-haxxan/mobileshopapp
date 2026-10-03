@@ -5,13 +5,16 @@ const KEY = storageKey('settings');
 const LEGACY_KEY = 'pos.settings'; // shared by older builds on the same origin; copied once as a starting point
 
 export const DEFAULT_SETTINGS = {
-  business: { name: 'My Store', address: '', phone: '', taxNo: '', footer: 'Thank you for your purchase!' },
+  business: { name: 'My Mobile Shop', address: '', phone: '', taxNo: '', footer: 'Thank you for shopping with us!' },
+  // Shop warranty (days) printed on phone receipts, by condition; repair warranty applies to job cards.
+  warranty: { new: 30, open_box: 15, used: 7, refurb: 7 },
+  repairWarrantyDays: 30,
   currency: 'Rs',
   taxEnabled: false,
   taxRate: 0,
   allowNegativeStock: false,
   updatePurchasePrice: true,
-  prefixes: { sale: 'SALE', purchase: 'PUR', saleReturn: 'SRN', purchaseReturn: 'PRN', receipt: 'RCV', payment: 'PAY', transfer: 'TRF', adjustment: 'ADJ' },
+  prefixes: { sale: 'SALE', purchase: 'PUR', saleReturn: 'SRN', purchaseReturn: 'PRN', receipt: 'RCV', payment: 'PAY', transfer: 'TRF', adjustment: 'ADJ', repair: 'JOB', service: 'SVC' },
   printer: { method: 'browser', width: 58, autoPrint: false, copies: 1, chunkSize: 20, imageMode: 'gsv0', deviceName: '', deviceId: '' },
   theme: 'auto',
   register: 'Main',
@@ -59,5 +62,5 @@ export function applyTheme() {
   const t = getSettings().theme;
   const dark = t === 'dark' || (t === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
   document.documentElement.setAttribute('data-bs-theme', dark ? 'dark' : 'light');
-  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#0f1117' : '#f4f5fb');
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#0a0f1d' : '#f4f5fb');
 }

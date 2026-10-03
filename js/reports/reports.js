@@ -8,6 +8,7 @@ import * as Auth from '../services/auth.js';
 import * as Catalog from '../services/catalog.js';
 import * as Posting from '../services/posting.js';
 import { printHTML } from '../printer/printer.js';
+import { CONDITIONS, PTA, DEVICE_STATUS, deviceName } from '../core/mobile.js';
 
 const $ = window.jQuery;
 const live = (x) => x.filter((d) => d.status !== 'void');
@@ -204,6 +205,65 @@ export const REPORTS = {
         foot: ['Total', '', sum(rows, (r) => r[2]), '', sum(rows, (r) => r[4]), sum(rows, (r) => r[5])] };
     },
   },
+  'phone-stock': {
+    title: 'Phone stock (IMEI)', icon: 'phone', group: 'Mobile shop', filters: [],
+    async run() {
+      const list = (await idb.getAllByIndex('devices', 'status', 'in_stock')).sort((a, b) => (a.purchaseDate || '').localeCompare(b.purchaseDate || ''));
+      const days = (d) => Math.max(0, Math.floor((Date.now() - new Date((d.purchaseDate || today()) + 'T00:00:00')) / 86400000));
+      const rows = list.map((d) => [{ v: deviceName(d), href: '#/phones/' + d.id }, d.imei1, CONDITIONS[d.condition]?.short || '', PTA[d.pta]?.short || '', days(d), d.costTotal || 0, d.salePrice || 0, round2((d.salePrice || 0) - (d.costTotal || 0))]);
+      return { summary: [['Phones in stock', rows.length], ['Cost value', money(sum(list, 'costTotal'))], ['Selling value', money(sum(list, 'salePrice'))], ['Expected profit', money(sum(rows, (r) => r[7]))]],
+        note: 'Oldest stock first. Days = days since you bought the phone.',
+        cols: [C('Phone'), C('IMEI'), C('Condition'), C('PTA'), C('Days', 'qty'), C('Cost', 'money'), C('Price', 'money'), C('Margin', 'money')], rows,
+        foot: ['Total', '', '', '', '', sum(rows, (r) => r[5]), sum(rows, (r) => r[6]), sum(rows, (r) => r[7])] };
+    },
+  },
+  'phone-sales': {
+    title: 'Phone sales & profit', icon: 'phone-flip', group: 'Mobile shop', filters: ['range'], perm: 'reports.profit',
+    async run({ from, to }) {
+      const [items, sales] = await Promise.all([byDate('saleItems', from, to), byDate('sales', from, to)]);
+      const sm = new Map(live(sales).map((s) => [s.id, s]));
+      const rows = items.filter((i) => i.deviceId && sm.has(i.saleId)).sort((a, b) => a.date.localeCompare(b.date))
+        .map((i) => [i.date, { v: i.saleNo, href: '#/sales/' + i.saleId }, i.name, i.imei, sm.get(i.saleId).customerName, CONDITIONS[i.condition]?.short || '', i.cost, i.amount, round2(i.amount - i.cost)]);
+      return { summary: [['Phones sold', rows.length], ['Sales', money(sum(rows, (r) => r[7]))], ['Cost', money(sum(rows, (r) => r[6]))], ['Profit', money(sum(rows, (r) => r[8]))]],
+        note: 'Sale amount is the phone price after line discount, before any bill discount.',
+        cols: [C('Date', 'date'), C('Bill'), C('Phone'), C('IMEI'), C('Customer'), C('Condition'), C('Cost', 'money'), C('Sold for', 'money'), C('Profit', 'money')], rows,
+        foot: ['Total', '', '', '', '', '', sum(rows, (r) => r[6]), sum(rows, (r) => r[7]), sum(rows, (r) => r[8])] };
+    },
+  },
+  'phone-register': {
+    title: 'Used phone register (seller details)', icon: 'person-vcard', group: 'Mobile shop', filters: ['range'],
+    async run({ from, to }) {
+      const list = (await idb.getAll('devices')).filter((d) => d.purchaseDate >= from && d.purchaseDate <= to);
+      const rows = list.filter((d) => d.source !== 'supplier').sort((a, b) => a.purchaseDate.localeCompare(b.purchaseDate))
+        .map((d) => [d.purchaseDate, d.purchaseNo, d.sellerName || '', d.sellerCnic || '', d.sellerPhone || '', deviceName(d), d.imei1, d.purchasePrice, DEVICE_STATUS[d.status]?.label || d.status]);
+      return { summary: [['Phones bought from people', rows.length], ['Total paid', money(sum(rows, (r) => r[7]))]],
+        note: 'Keep this register for police/PTA checks: every used phone you bought, who sold it, their CNIC and the IMEI.',
+        cols: [C('Date', 'date'), C('Purchase'), C('Seller'), C('CNIC'), C('Phone no.'), C('Phone'), C('IMEI'), C('Paid', 'money'), C('Now')], rows,
+        foot: ['Total', '', '', '', '', '', '', sum(rows, (r) => r[7]), ''] };
+    },
+  },
+  repairs: {
+    title: 'Repair jobs', icon: 'tools', group: 'Mobile shop', filters: ['range'],
+    async run({ from, to }) {
+      const all = await idb.getAll('repairs');
+      const done = all.filter((r) => r.status === 'delivered' && r.deliveredDate >= from && r.deliveredDate <= to).sort((a, b) => a.deliveredDate.localeCompare(b.deliveredDate));
+      const open = all.filter((r) => ['received', 'diagnosing', 'waiting_parts', 'in_progress', 'ready'].includes(r.status));
+      const rows = done.map((r) => [r.deliveredDate, { v: r.number, href: '#/repairs/' + r.id }, r.customerName, [r.brand, r.model].filter(Boolean).join(' '), r.fault, r.total, r.partsCost || 0, round2(r.total - (r.partsCost || 0)), r.balance || 0]);
+      return { summary: [['Delivered', rows.length], ['Income', money(sum(rows, (r) => r[5]))], ['Parts cost', money(sum(rows, (r) => r[6]))], ['Profit', money(sum(rows, (r) => r[7]))], ['Still open', open.length], ['Unpaid balance', money(sum(rows, (r) => r[8]))]],
+        cols: [C('Delivered', 'date'), C('Job'), C('Customer'), C('Phone'), C('Fault'), C('Charges', 'money'), C('Parts cost', 'money'), C('Profit', 'money'), C('Balance', 'money')], rows,
+        foot: ['Total', '', '', '', '', sum(rows, (r) => r[5]), sum(rows, (r) => r[6]), sum(rows, (r) => r[7]), sum(rows, (r) => r[8])] };
+    },
+  },
+  services: {
+    title: 'Easypaisa / JazzCash / load', icon: 'wallet2', group: 'Mobile shop', filters: ['range'],
+    async run({ from, to }) {
+      const docs = live(await byDate('services', from, to)).sort((a, b) => a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt));
+      const rows = docs.map((d) => [d.date, { v: d.number, href: '#/services' }, d.walletName, d.typeLabel, d.customerNumber || d.customerName || '', d.amount, d.fee, d.commission, d.income]);
+      return { summary: [['Transactions', rows.length], ['Volume', money(sum(rows, (r) => r[5]))], ['Fees collected', money(sum(rows, (r) => r[6]))], ['Commission', money(sum(rows, (r) => r[7]))], ['Total earned', money(sum(rows, (r) => r[8]))]],
+        cols: [C('Date', 'date'), C('No'), C('Wallet'), C('Service'), C('Customer'), C('Amount', 'money'), C('Fee', 'money'), C('Commission', 'money'), C('Earned', 'money')], rows,
+        foot: ['Total', '', '', '', '', sum(rows, (r) => r[5]), sum(rows, (r) => r[6]), sum(rows, (r) => r[7]), sum(rows, (r) => r[8])] };
+    },
+  },
   profit: {
     title: 'Profit summary', icon: 'graph-up-arrow', group: 'Accounts', perm: 'reports.profit', filters: ['range'],
     async run({ from, to }) {
@@ -212,7 +272,8 @@ export const REPORTS = {
       const grossSales = sum(s, (d) => d.total - d.tax);
       const returns = sum(r, (d) => d.total - d.tax);
       const netSales = round2(grossSales - returns);
-      const cogs = round2(sum(items, (i) => i.qty * i.cost) - sum(r, (d) => d.items.reduce((a, i) => a + i.qty * i.cost, 0)));
+      const repairParts = sum(moves.filter((m) => m.type === 'repair'), (m) => -m.qty * (m.cost || 0));
+      const cogs = round2(sum(items, (i) => i.qty * i.cost) - sum(r, (d) => d.items.reduce((a, i) => a + i.qty * i.cost, 0)) + repairParts);
       const gross = round2(netSales - cogs);
       const types = Object.fromEntries(accounts.map((a) => [a.id, a.type]));
       const skip = new Set(['sales', 'sales_returns', 'purchases', 'purchase_returns']);
@@ -222,8 +283,8 @@ export const REPORTS = {
       const expenses = sum(exp, (e) => e.debit - e.credit);
       const writeOff = sum(moves.filter((m) => m.type === 'adjust'), (m) => -m.qty * m.cost);
       const net = round2(gross + otherIncome - expenses - writeOff);
-      const rows = [['Sales (excl. tax, after discounts)', grossSales], ['Less: sales returns', -returns], ['Net sales', netSales], ['Less: cost of goods sold', -cogs], ['Gross profit', gross],
-        ['Add: other income', otherIncome], ['Less: expenses', -expenses], ['Less: stock adjustments (loss) / gain', -writeOff], ['Net profit', net]];
+      const rows = [['Sales (excl. tax, after discounts)', grossSales], ['Less: sales returns', -returns], ['Net sales', netSales], ['Less: cost of goods sold (phones, accessories, repair parts)', -cogs], ['Gross profit', gross],
+        ['Add: repair, service-fee & other income', otherIncome], ['Less: expenses', -expenses], ['Less: stock adjustments (loss) / gain', -writeOff], ['Net profit', net]];
       return { summary: [['Net sales', money(netSales)], ['Gross profit', money(gross)], ['Gross margin', netSales ? fmtNum((gross / netSales) * 100) + '%' : '—'], ['Net profit', money(net)]],
         note: 'Cost of goods sold uses the purchase price recorded on each sale line at the time of sale.',
         cols: [C('Item'), C('Amount', 'money')], rows, boldRows: [2, 4, 8] };

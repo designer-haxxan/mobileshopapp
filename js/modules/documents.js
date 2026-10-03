@@ -66,7 +66,7 @@ async function renderDoc(el, kind, id) {
   const returns = (await idb.getAllByIndex(k.retStore, k.fk, id)).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const liveReturns = returns.filter((r) => r.status !== 'void');
   const isVoid = d.status === 'void';
-  const canEdit = !isVoid && !liveReturns.length && Auth.can(kind === 'sale' ? 'sale.edit' : 'purchase.manage');
+  const canEdit = !isVoid && !liveReturns.length && d.kind !== 'device' && Auth.can(kind === 'sale' ? 'sale.edit' : 'purchase.manage');
   const canReturn = !isVoid && Auth.can(kind === 'sale' ? 'sale.return' : 'purchase.manage');
   const canVoid = !isVoid && !liveReturns.length && Auth.can(kind === 'sale' ? 'sale.void' : 'purchase.manage');
   const partyLink = d[k.partyId] ? `<a href="#/${k.partyRoute}/${encodeURIComponent(d[k.partyId])}">${esc(d[k.party])}</a>` : esc(d[k.party]);

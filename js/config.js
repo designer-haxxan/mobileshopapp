@@ -1,11 +1,11 @@
 // Deployment configuration.
 export const CONFIG = {
-  APP_NAME: 'SaleAPP POS',
+  APP_NAME: 'MobiShop POS',
   // Namespace for everything this app stores in the browser. All apps on designer-haxxan.github.io share
   // one origin (one IndexedDB / LocalStorage / Cache Storage), so every app must use its own unique APP_ID.
-  APP_ID: 'disterp',
-  APP_VERSION: '1.3.0',
-  SCHEMA_VERSION: 1,
+  APP_ID: 'mobishop',
+  APP_VERSION: '2.0.0',
+  SCHEMA_VERSION: 2,
   BACKUP_VERSION: 1,
   // Login API: POST {AUTH_API_BASE}/login. The server does not send CORS headers, so the app must be
   // served from the same origin (https://eposwala.com) or the API must allow the app's origin.

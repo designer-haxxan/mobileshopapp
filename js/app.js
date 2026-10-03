@@ -6,19 +6,25 @@ import { esc } from './core/utils.js';
 import { openDB } from './db/idb.js';
 import * as Auth from './services/auth.js';
 import * as Catalog from './services/catalog.js';
+import * as Seed from './services/seed.js';
 
 const $ = window.jQuery;
 
 // Route table: name → [loader, title, permission|null, icon, menu section]
 const ROUTES = {
-  dashboard: [() => import('./modules/dashboard.js'), 'Dashboard', null, 'house', 'Main'],
+  dashboard: [() => import('./modules/dashboard.js'), 'Shop Dashboard', null, 'speedometer2', 'Main'],
   pos: [() => import('./modules/pos.js'), 'New Sale', 'sale.create', 'cart-plus', 'Main'],
   sales: [() => import('./modules/documents.js'), 'Sales', null, 'receipt', 'Main'],
   purchase: [() => import('./modules/pos.js'), 'New Purchase', 'purchase.manage', null, null],
   purchases: [() => import('./modules/documents.js'), 'Purchases', 'purchase.manage', 'bag', 'Main'],
   returns: [() => import('./modules/documents.js'), 'Returns', null, 'arrow-return-left', 'Main'],
-  products: [() => import('./modules/products.js'), 'Products', null, 'box-seam', 'Inventory'],
-  stock: [() => import('./modules/stock.js'), 'Stock', null, 'boxes', 'Inventory'],
+  phones: [() => import('./modules/phones.js'), 'Phone Stock (IMEI)', null, 'phone', 'Mobile Shop'],
+  phonebuy: [() => import('./modules/phones.js'), 'Buy / Trade-in Phone', 'phone.buy', 'phone-flip', 'Mobile Shop'],
+  repairs: [() => import('./modules/repairs.js'), 'Repairs', 'repair.manage', 'tools', 'Mobile Shop'],
+  services: [() => import('./modules/services.js'), 'Easypaisa, JazzCash & Load', 'service.create', 'wallet2', 'Mobile Shop'],
+  imei: [() => import('./modules/phones.js'), 'IMEI Check', null, 'upc-scan', 'Mobile Shop'],
+  products: [() => import('./modules/products.js'), 'Accessories & Parts', null, 'headphones', 'Inventory'],
+  stock: [() => import('./modules/stock.js'), 'Accessory Stock', null, 'boxes', 'Inventory'],
   customers: [() => import('./modules/parties.js'), 'Customers', null, 'people', 'Parties'],
   suppliers: [() => import('./modules/parties.js'), 'Suppliers', 'purchase.manage', 'truck', 'Parties'],
   vouchers: [() => import('./modules/vouchers.js'), 'Cash Book & Payments', 'voucher.create', 'cash-coin', 'Accounts'],
@@ -27,7 +33,7 @@ const ROUTES = {
   backup: [() => import('./modules/backup.js'), 'Backup & Restore', 'backup.export', 'cloud-arrow-down', 'Administration'],
   settings: [() => import('./modules/settings.js'), 'Settings', null, 'gear', 'Administration'],
 };
-const FOCUS_ROUTES = new Set(['pos', 'purchase']);
+const FOCUS_ROUTES = new Set(['pos', 'purchase', 'phonebuy']);
 
 let currentModule = null;
 let routeToken = 0;
@@ -118,6 +124,7 @@ async function route() {
   try { currentModule?.destroy?.(); } catch (e) { console.warn(e); }
   currentModule = null;
   bootstrap.Offcanvas.getInstance('#menu-offcanvas')?.hide();
+  document.querySelectorAll('.modal.show').forEach((m) => bootstrap.Modal.getInstance(m)?.hide());
   $('.nav-menu .nav-link, #bottom-nav a').removeClass('active');
   $(`.nav-menu [data-route="${name}"], #bottom-nav [data-route="${name}"]`).addClass('active');
   $('body').toggleClass('focus-mode', FOCUS_ROUTES.has(name));
@@ -141,6 +148,7 @@ async function route() {
 
 // ---------- Auth gate ----------
 async function startApp() {
+  await Seed.run();
   await Catalog.load();
   buildMenu();
   showView('app');

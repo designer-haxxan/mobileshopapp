@@ -1,14 +1,14 @@
 {
-  "name": "SaleAPP POS",
-  "short_name": "SaleAPP",
-  "description": "Offline-first point of sale with sales, purchases, stock, accounts and reports.",
+  "name": "MobiShop POS — Mobile Shop Software",
+  "short_name": "MobiShop",
+  "description": "Offline-first mobile shop software: IMEI phone stock, used phone buying, repairs, Easypaisa/JazzCash, accessories, cash book and reports.",
   "id": "./index.html",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
   "orientation": "any",
-  "background_color": "#0f0c29",
-  "theme_color": "#4f46e5",
+  "background_color": "#050a1c",
+  "theme_color": "#2563eb",
   "categories": ["business", "finance", "productivity"],
   "icons": [
     { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
@@ -17,6 +17,8 @@
   ],
   "shortcuts": [
     { "name": "New sale", "url": "./index.html#/pos", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Repairs", "url": "./index.html#/repairs", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Phone stock", "url": "./index.html#/phones", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] },
     { "name": "Dashboard", "url": "./index.html#/dashboard", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] }
   ]
 }

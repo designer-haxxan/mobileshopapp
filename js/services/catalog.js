@@ -6,6 +6,7 @@ const products = new Map();
 const categories = new Map();
 const byBarcode = new Map();
 const parties = { customers: new Map(), suppliers: new Map() };
+const devices = new Map(); // in-stock phones only
 
 function indexProduct(p) {
   const old = products.get(p.id);
@@ -15,9 +16,15 @@ function indexProduct(p) {
   p._s = lc([p.name, p.sku, p.barcode, categories.get(p.categoryId)?.name].filter(Boolean).join(' '));
 }
 
+function indexDevice(d) {
+  d._s = lc([d.brand, d.model, d.storage, d.ram, d.color, d.imei1, d.imei2, d.condition, d.pta, d.sellerName].filter(Boolean).join(' '));
+  devices.set(d.id, d);
+}
+
 export async function load() {
-  const [ps, cs, cus, sups] = await idb.read(['products', 'categories', 'customers', 'suppliers'], (t) =>
-    Promise.all([t.getAll('products'), t.getAll('categories'), t.getAll('customers'), t.getAll('suppliers')]));
+  const [ps, cs, cus, sups, devs] = await idb.read(['products', 'categories', 'customers', 'suppliers', 'devices'], (t) =>
+    Promise.all([t.getAll('products'), t.getAll('categories'), t.getAll('customers'), t.getAll('suppliers'), t.getAllByIndex('devices', 'status', 'in_stock')]));
+  devices.clear(); devs.forEach(indexDevice);
   products.clear(); categories.clear(); byBarcode.clear(); parties.customers.clear(); parties.suppliers.clear();
   cs.forEach((c) => categories.set(c.id, c));
   ps.forEach(indexProduct);
@@ -31,6 +38,10 @@ export async function refreshProducts(ids) {
     if (fresh[i]) indexProduct(fresh[i]);
     else { const old = products.get(id); if (old?.barcode) byBarcode.delete(lc(old.barcode)); products.delete(id); }
   });
+}
+export async function refreshDevices() {
+  const devs = await idb.getAllByIndex('devices', 'status', 'in_stock');
+  devices.clear(); devs.forEach(indexDevice);
 }
 export async function refreshCategories() {
   const cs = await idb.getAll('categories');
@@ -75,6 +86,23 @@ export function searchProducts(q, { limit = 40, categoryId = null, includeInacti
     const eb = (lc(b.barcode) === q0 || lc(b.sku) === q0) ? 0 : 1;
     return ea - eb || a.name.localeCompare(b.name);
   });
+  return out.slice(0, limit);
+}
+
+export const allDevices = () => [...devices.values()];
+export const device = (id) => devices.get(id);
+// Exact IMEI (either slot) or a 6+ digit tail of it.
+export function findDeviceByCode(code) {
+  const c = String(code ?? '').replace(/[s-]/g, '');
+  if (!/^d{6,16}$/.test(c)) return null;
+  const hits = [...devices.values()].filter((d) => d.imei1 === c || d.imei2 === c || (c.length < 15 && (d.imei1.endsWith(c) || (d.imei2 && d.imei2.endsWith(c)))));
+  return hits.length === 1 ? hits[0] : null;
+}
+export function searchDevices(q, { limit = 40 } = {}) {
+  const terms = lc(q).split(/s+/).filter(Boolean);
+  const out = [];
+  for (const d of devices.values()) if (terms.every((t) => d._s.includes(t))) out.push(d);
+  out.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
   return out.slice(0, limit);
 }
 

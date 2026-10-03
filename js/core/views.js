@@ -9,8 +9,11 @@ const REF_ROUTES = {
   sale: (id) => `#/sales/${id}`, purchase: (id) => `#/purchases/${id}`,
   saleReturn: (id) => `#/returns/sale/${id}`, purchaseReturn: (id) => `#/returns/purchase/${id}`,
   receipt: (id) => `#/vouchers/${id}`, payment: (id) => `#/vouchers/${id}`, transfer: (id) => `#/vouchers/${id}`,
+  service: (id) => `#/services/${id}`,
+  repair: (id) => `#/repairs/${id.split('%3A')[0]}`, repairPay: (id) => `#/repairs/${id.split('%3A')[0]}`,
 };
-export const REF_LABELS = { sale: 'Sale', purchase: 'Purchase', saleReturn: 'Sale return', purchaseReturn: 'Purchase return', receipt: 'Receipt', payment: 'Payment', transfer: 'Transfer', opening: 'Opening balance' };
+export const REF_LABELS = { sale: 'Sale', purchase: 'Purchase', saleReturn: 'Sale return', purchaseReturn: 'Purchase return', receipt: 'Receipt', payment: 'Payment', transfer: 'Transfer', opening: 'Opening balance',
+  service: 'Wallet / load service', repair: 'Repair job', repairPay: 'Repair advance' };
 
 export function refLink(refType, id, text) {
   const r = REF_ROUTES[refType];

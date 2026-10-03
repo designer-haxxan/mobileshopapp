@@ -7,17 +7,19 @@ import { nowISO, round3, uuid, AppError } from '../core/utils.js';
 import * as Auth from './auth.js';
 import * as Catalog from './catalog.js';
 
-export const FORMAT = 'saleapp-pos-backup';
+export const FORMAT = 'mobishop-pos-backup';
+const ACCEPTED_FORMATS = [FORMAT, 'saleapp-pos-backup'];
 
 // Required fields per collection (id/key checked separately).
 const REQUIRED = {
   products: ['name'], customers: ['name'], suppliers: ['name'], accounts: ['name', 'type'], categories: ['name'],
-  sales: ['number', 'date', 'total'], saleItems: ['saleId', 'productId', 'qty'], purchases: ['number', 'date', 'total'], purchaseItems: ['purchaseId', 'productId', 'qty'],
+  sales: ['number', 'date', 'total'], saleItems: ['saleId', 'qty'], purchases: ['number', 'date', 'total'], purchaseItems: ['purchaseId', 'qty'],
   saleReturns: ['number', 'date', 'saleId', 'items'], purchaseReturns: ['number', 'date', 'purchaseId', 'items'], vouchers: ['number', 'date', 'amount'],
   entries: ['txnId', 'accountId', 'date', 'debit', 'credit'], stockMoves: ['productId', 'date', 'qty', 'refId'], adjustments: ['number', 'date', 'items'],
+  devices: ['imei1', 'brand', 'status'], repairs: ['number', 'date', 'status'], services: ['number', 'date', 'amount'],
 };
-const DOC_STORES = { sales: ['saleItems', 'saleId'], purchases: ['purchaseItems', 'purchaseId'], saleReturns: null, purchaseReturns: null, vouchers: null, adjustments: null };
-const NUMBERED = ['sales', 'purchases', 'saleReturns', 'purchaseReturns', 'vouchers', 'adjustments'];
+const DOC_STORES = { sales: ['saleItems', 'saleId'], purchases: ['purchaseItems', 'purchaseId'], saleReturns: null, purchaseReturns: null, vouchers: null, adjustments: null, repairs: null, services: null };
+const NUMBERED = ['sales', 'purchases', 'saleReturns', 'purchaseReturns', 'vouchers', 'adjustments', 'repairs', 'services'];
 
 async function sha256(text) {
   if (!crypto?.subtle) return null;
@@ -44,7 +46,7 @@ export async function createBackup() {
 export function validateBackup(obj) {
   const errors = []; const warnings = [];
   if (!obj || typeof obj !== 'object') return { ok: false, errors: ['The file is not a valid JSON object.'], warnings };
-  if (obj.format !== FORMAT) errors.push('This file is not a SaleAPP POS backup.');
+  if (!ACCEPTED_FORMATS.includes(obj.format)) errors.push('This file is not a MobiShop POS backup.');
   if (!Number.isInteger(obj.backupVersion)) errors.push('Missing backup version.');
   else if (obj.backupVersion > CONFIG.BACKUP_VERSION) errors.push(`This backup was made by a newer app version (backup v${obj.backupVersion}). Update the app first.`);
   if (obj.schemaVersion > CONFIG.SCHEMA_VERSION) errors.push(`Unsupported database schema version ${obj.schemaVersion}.`);
@@ -127,7 +129,7 @@ export async function restore(obj, mode, { includeSettings = true } = {}) {
         if (stamp(r) > stamp(local)) { report.updated++; return true; }
         report.skipped++; return false;
       };
-      for (const store of [...NUMBERED, 'products', 'customers', 'suppliers', 'accounts']) {
+      for (const store of [...NUMBERED, 'devices', 'products', 'customers', 'suppliers', 'accounts']) {
         for (const r of data[store]) {
           const ok = await decide(store, r);
           useBackup.set(store + ':' + r.id, ok);
@@ -140,7 +142,7 @@ export async function restore(obj, mode, { includeSettings = true } = {}) {
         if (e.txnId.startsWith('open:C:')) return 'customers:' + e.txnId.slice(7);
         if (e.txnId.startsWith('open:S:')) return 'suppliers:' + e.txnId.slice(7);
         if (e.txnId.startsWith('open:')) return 'accounts:' + e.txnId.slice(5);
-        return docParent.get(e.txnId);
+        return docParent.get(e.txnId) || docParent.get(e.txnId.split(':')[0]);
       };
       const moveParent = (m) => (m.refId.startsWith('open:') ? 'products:' + m.refId.slice(5) : docParent.get(m.refId));
       // Replace children of every parent taken from the backup.
