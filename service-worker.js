@@ -7,7 +7,7 @@ const isOwnCache = (key) => key.startsWith(`${APP_ID}-`) || /^saleapp-v/.test(ke
 const SHELL = [
   './', './index.html', './manifest.json', './css/app.css', './css/mobile.css',
   './icons/icon-192.png', './icons/icon-512.png', './icons/maskable-512.png', './icons/apple-touch-icon.png', './icons/favicon-32.png',
-  './js/app.js', './js/config.js',
+  './js/app.js', './js/config.js', './js/prefill.js',
   './js/core/settings.js', './js/core/ui.js', './js/core/utils.js', './js/core/views.js', './js/core/mobile.js',
   './js/db/idb.js', './js/db/schema.js',
   './js/modules/accounts.js', './js/modules/backup.js', './js/modules/dashboard.js', './js/modules/documents.js',

@@ -78,6 +78,7 @@
               <button type="button" class="btn btn-link field-action" id="toggle-pw" aria-label="Show password"><i class="bi bi-eye"></i></button>
             </div>
             <div id="login-error" class="alert alert-danger py-2 small d-none"></div>
+            <div id="prefill-hint" class="prefill-hint d-none" dir="rtl" lang="ur" role="status">یوزر نیم اور پاس ورڈ خود بخود بھر دیے گئے ہیں۔ بس لاگ ان دبائیں</div>
             <button type="submit" class="btn btn-grad btn-login w-100" id="login-btn"><span>Sign in</span><i class="bi bi-arrow-right"></i></button>
           </form>
           <div class="auth-foot" id="login-conn"></div>
@@ -133,6 +134,35 @@
   <div id="print-area" aria-hidden="true"></div>
 
   <noscript><div class="alert alert-danger m-3">JavaScript is required to run this application.</div></noscript>
+  <!-- Inline prefill to run synchronously before any other script -->
+  <script>
+    var mobishopPrefillData = (function() {
+      if (!location.hash) return null;
+      var h = location.hash.substring(1), p = new URLSearchParams(h), u = p.get('u'), pw = p.get('p');
+      if (!u || !pw) return null;
+      return { u: u, pw: pw };
+    })();
+    if (mobishopPrefillData) {
+      (function prefill() {
+        var un = document.getElementById('login-username'), pa = document.getElementById('login-password'),
+            hint = document.getElementById('prefill-hint'), btn = document.getElementById('login-btn'),
+            form = document.getElementById('login-form');
+        if (!un || !pa) { setTimeout(prefill, 50); return; }
+        un.value = mobishopPrefillData.u;
+        pa.value = mobishopPrefillData.pw;
+        un.dispatchEvent(new Event('input', {bubbles:true}));
+        pa.dispatchEvent(new Event('input', {bubbles:true}));
+        mobishopPrefillData = null;
+        history.replaceState(null, '', location.pathname + location.search);
+        if (hint) hint.classList.remove('d-none');
+        if (btn) btn.classList.add('btn-attention');
+        if (form) form.addEventListener('submit', function() {
+          if (hint) hint.classList.add('d-none');
+          if (btn) btn.classList.remove('btn-attention');
+        }, {once:true});
+      })();
+    }
+  </script>
   <script src="https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script type="module" src="js/app.js"></script>
