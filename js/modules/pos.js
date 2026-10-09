@@ -500,7 +500,7 @@ export default {
     });
     $root.on('click', '.search-results [data-i]', function () { const r = results[+this.dataset.i]; if (r._device) addDevice(r._device); else addProduct(r); $q.val(''); hideResults(); $q.trigger('focus'); });
     $root.on('click', '.quick-add-link', (e) => { e.preventDefault(); quickAdd($q.val().trim()); });
-    $(document).on('click.posres', (e) => { if (!$(e.target).closest('.pos-search').length) hideResults(); });
+    $(document).on('click.posres', (e) => { if (!$(e.target).closest('.pos-search, .dropdown-toggle, .dropdown-menu').length) hideResults(); });
 
     $root.on('click', '.btn-inc, .btn-dec', function () {
       const i = +$(this).closest('.cart-line').data('i');
